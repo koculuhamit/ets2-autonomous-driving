@@ -2,6 +2,12 @@
 
 [![CI](https://github.com/koculuhamit/ets2-autonomous-driving/actions/workflows/ci.yml/badge.svg)](https://github.com/koculuhamit/ets2-autonomous-driving/actions/workflows/ci.yml)
 
+
+
+https://github.com/user-attachments/assets/3c20630b-1242-488d-a430-745a257baeab
+
+
+
 An external, modular autonomous driving stack for **Euro Truck Simulator 2**.
 
 > **This is a game project.** None of this code is safe or suitable for a real
