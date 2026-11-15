@@ -1,7 +1,8 @@
 # ETS2 autopilot 2.0.0
 
 The first release driven on Windows 11. Unzip it, run the launcher, take a
-job and switch the beacon on, and the truck drives the delivery. Before
+job and switch the truck's beacon on with O (the game's beacon key), and the
+truck drives the delivery; switch it off with O again to take the truck back. Before
 release the developer drove deliveries with it until three in a row went
 without a hit or a take-over: Bergen to Calais, Milan to Verona, Munich to
 Nuremberg.

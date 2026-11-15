@@ -54,6 +54,12 @@ game's mod manager. It takes the collision away from toll and yard gates.
 The truck drives through toll booths without stopping for their barriers,
 and without the mod it would hit them.
 
+You hand the truck over and take it back with its beacon light. The game's
+key for it is O by default (or whatever key you bound to the beacon in the
+game's controls). Press it once to switch the beacon on, and the autopilot
+drives; press it again to switch it off, and the truck is yours at once.
+Pressing the brake or the throttle also takes the truck back.
+
 From source:
 
 ```bash

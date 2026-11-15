@@ -81,7 +81,9 @@ program that drives the truck, and the beacon only tells it to go.
    the road. Go on to a straight stretch before handing over: switched on at
    speed into a turn, the truck takes the turn wide. Its lanes start at the
    yard's gate, and the gate's booth is not on its map.
-3. Switch on the beacon (O). The truck drives the delivery and stops at the
+3. Switch on the beacon with O, the game's default key for the beacon (or
+   the key you bound to it in the game's controls); the same key switches it
+   off. With the beacon on, the truck drives the delivery and stops at the
    depot's gate. Ports and trains are yours: it stops where their own roads
    begin, before the passport booths and the quay. It never drives into a
    filling station and does not refuel. Under 600 km of range the launcher
