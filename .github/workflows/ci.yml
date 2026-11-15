@@ -112,9 +112,10 @@ jobs:
         run: uv run pytest -m "not game and not hardware" -v
 
       - uses: actions/upload-artifact@v4
-        # With the account's storage spent the upload fails; the tests above
-        # have already said what this run is for.
-        continue-on-error: true
+        # A private repository's artifacts count against the account's
+        # monthly storage; spent, the upload fails there, and the tests above
+        # have already said what the run is for. A public one is not counted.
+        continue-on-error: ${{ github.event.repository.private }}
         with:
           name: layout-${{ matrix.os }}
           path: layout-${{ matrix.os }}.json
@@ -123,7 +124,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
-        continue-on-error: true
+        continue-on-error: ${{ github.event.repository.private }}
         with:
           name: plugin-${{ matrix.os }}
           path: |
@@ -136,10 +137,11 @@ jobs:
     name: Cross-platform ABI
     needs: build
     runs-on: ubuntu-latest
-    # Its layouts come through the account's storage; spent, they cannot, and
-    # this shows red without failing the run. The layouts change only with
-    # plugin/ and core/bridge/layout.py.
-    continue-on-error: true
+    # Its layouts come through the artifact storage. In a private repository
+    # that storage can be spent, and then this shows red without failing the
+    # run; in the public one a failure here fails the run. The layouts change
+    # only with plugin/ and core/bridge/layout.py.
+    continue-on-error: ${{ github.event.repository.private }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -206,7 +208,7 @@ jobs:
       - name: Package
         run: uv run python scripts/package.py --no-model
       - uses: actions/upload-artifact@v4
-        continue-on-error: true
+        continue-on-error: ${{ github.event.repository.private }}
         with:
           name: release-${{ matrix.os }}
           path: dist/ets2ad-*.zip
