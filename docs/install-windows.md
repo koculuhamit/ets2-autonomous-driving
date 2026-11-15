@@ -11,6 +11,10 @@ and 16 GB of RAM.
   times slower, which is enough on a fast processor.
 - About 4 GB of free disk: 2.5 GB for ONNX Runtime with CUDA, the rest for
   the map read out of your game.
+- [This Steam Workshop mod](https://steamcommunity.com/sharedfiles/filedetails/?id=2131396358), subscribed to and enabled in the
+  game's mod manager. It is required: it takes the collision away from toll
+  and yard gates, and the truck drives through toll booths without stopping
+  for their barriers. Without it the truck hits the closed barrier.
 - An internet connection for the first start.
 
 You install nothing else by hand. Python, its packages and the tools come
@@ -31,6 +35,8 @@ with the launcher.
    a game update.
 3. Start the game. It warns about SDK features (that is the plugin): press OK.
    It asks every time the game starts.
+4. In the game's mod manager, enable the barrier mod (see "What you need")
+   for your profile. The game keeps it enabled after that.
 
 ## In the game
 
@@ -47,9 +53,8 @@ with the launcher.
   mirror on that side for a vehicle coming up, and waits or turns back for
   one coming up fast. By night it sees little there.
 - Gearbox: automatic.
-- Barriers: the truck does not stop for toll or yard gates. Subscribe to
-  [this Workshop mod](https://steamcommunity.com/sharedfiles/filedetails/?id=2131396358), which takes their collision away, and enable
-  it in the game's mod manager.
+- Barriers: the truck does not stop for toll or yard gates, so the barrier
+  mod from "What you need" must be enabled.
 
 ## Drive
 

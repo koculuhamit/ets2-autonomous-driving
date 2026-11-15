@@ -14,6 +14,10 @@ and a car coming up fast in the mirror.
 
 Install: [Windows 11](install-windows.md) · [Linux](install-linux.md)
 
+Required: [this Steam Workshop mod](https://steamcommunity.com/sharedfiles/filedetails/?id=2131396358), enabled in the game's mod
+manager. It takes the collision away from toll and yard gates; the truck
+does not stop for their barriers and would hit them without it.
+
 ## What it does
 
 - Follows the game's own GPS route, planned from the map read out of your
@@ -74,8 +78,8 @@ Install: [Windows 11](install-windows.md) · [Linux](install-linux.md)
 - Cap the game's frame rate at 60 FPS. Uncapped, the game at times left the
   detector no GPU for half a second, and the drive stopped because its view
   of the road was too old.
-- It does not stop for toll or yard gates: drive with
-  [a mod that takes their collision away](https://steamcommunity.com/sharedfiles/filedetails/?id=2131396358).
+- It does not stop for toll or yard gates: the barrier mod above is
+  required.
 - The distances it reports are the game's kilometres. Along a route they are
   averaged, so in towns they run a little long.
 - Trucks only: buses (the Coaches DLC) are not driven yet.

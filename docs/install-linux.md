@@ -12,6 +12,10 @@ Truck Simulator 2 (not Proton) and an NVIDIA GPU.
 - An NVIDIA GPU with its proprietary driver is best. Without one (an AMD or
   Intel GPU, or none), perception runs on the CPU, about three times slower,
   and no delivery has been driven that way yet.
+- [This Steam Workshop mod](https://steamcommunity.com/sharedfiles/filedetails/?id=2131396358), subscribed to and enabled in the
+  game's mod manager. It is required: it takes the collision away from toll
+  and yard gates, and the truck drives through toll booths without stopping
+  for their barriers. Without it the truck hits the closed barrier.
 - About 4 GB of free disk, and `curl`:
 
 ```bash
@@ -43,6 +47,8 @@ sudo apt install curl
 
 3. Start the game. It warns about SDK features (that is the plugin): press OK.
    It asks every time the game starts.
+4. In the game's mod manager, enable the barrier mod (see "What you need")
+   for your profile. The game keeps it enabled after that.
 
 ## In the game
 
@@ -61,9 +67,8 @@ sudo apt install curl
   mirror on that side for a vehicle coming up, and waits or turns back for
   one coming up fast. By night it sees little there.
 - Gearbox: automatic.
-- Barriers: the truck does not stop for toll or yard gates. Subscribe to
-  [this Workshop mod](https://steamcommunity.com/sharedfiles/filedetails/?id=2131396358), which takes their collision away, and enable
-  it in the game's mod manager.
+- Barriers: the truck does not stop for toll or yard gates, so the barrier
+  mod from "What you need" must be enabled.
 
 ## Drive
 

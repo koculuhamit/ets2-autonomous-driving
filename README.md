@@ -49,6 +49,11 @@ launcher fetches [uv](https://docs.astral.sh/uv/) if it is missing, and uv
 brings Python. The install guides for [Linux](docs/install-linux.md) and
 [Windows](docs/install-windows.md) cover the game's settings.
 
+One mod is required: [this Steam Workshop mod](https://steamcommunity.com/sharedfiles/filedetails/?id=2131396358), enabled in the
+game's mod manager. It takes the collision away from toll and yard gates.
+The truck drives through toll booths without stopping for their barriers,
+and without the mod it would hit them.
+
 From source:
 
 ```bash
