@@ -1,0 +1,40 @@
+# Data (datasets, map caches, recordings) -- never committed
+/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# C++ / CMake
+plugin/build/
+build/
+*.so
+*.dll
+*.o
+*.obj
+compile_commands.json
+
+# Models / engines (distribute ONNX via releases, never commit)
+*.engine
+*.trt
+*.pt
+*.onnx
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+dist/
+
+# .NET (the offline map extractor)
+tools/map_extract/bin/
+tools/map_extract/obj/

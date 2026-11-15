@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Offline map extraction. C# lives here and nowhere else in this project:
+       TruckLib is the only maintained reader for the map format. Nothing built
+       here runs while the truck is moving; it produces a cache, once, which
+       Python reads. See ADR-0001 and ADR-0006. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Ets2Ad.MapExtract</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="TruckLib" Version="0.5.1" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,16 @@
+; Module definition for the Windows build.
+;
+; The SDK's SCSAPI_RESULT macro expands to `scs_result_t __stdcall` and nothing
+; else -- no __declspec(dllexport). Without this file MSVC produces a DLL with
+; no exports at all, which the game loads and then quietly ignores: no error,
+; no log line, no telemetry. The Linux build has no such problem, so the gap
+; would not have surfaced until Phase 12.
+;
+; Names are unmangled here because the game is x64 only, where __stdcall adds
+; no decoration. A 32-bit build would need _scs_telemetry_init@8 and friends.
+LIBRARY ets2ad_telemetry
+EXPORTS
+    scs_telemetry_init
+    scs_telemetry_shutdown
+    scs_input_init
+    scs_input_shutdown

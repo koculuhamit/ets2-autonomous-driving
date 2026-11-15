@@ -1,0 +1,213 @@
+# Continuous integration.
+#
+# The Windows jobs are not an afterthought. This project targets Linux and
+# Windows, and the way cross-platform projects quietly become single-platform
+# is by leaving the second platform until the end. So Windows builds the plugin
+# and runs the test suite on every commit, from the first one.
+#
+# The `abi` job is the one that matters most: it compares the struct layouts
+# GCC and MSVC actually produced. The layout header is written so they must
+# agree, with explicit padding and static assertions -- but that is a claim,
+# and this is the check.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  # The plugin and the release packages are kept only when asked for: by hand
+  # (Actions, "Run workflow") or with a version tag. Kept from every push they
+  # spent the account's Actions storage -- 1147 artifacts by 14 Nov 2026 --
+  # and every run after failed at its upload.
+  workflow_dispatch:
+
+# Read the repository, nothing more: on a public repository a pull request
+# from a fork runs this too.
+permissions:
+  contents: read
+
+# A new push supersedes an in-flight run of the same branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.12.17"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --extra dev
+      - name: ruff check
+        run: uv run ruff check .
+      - name: ruff format
+        run: uv run ruff format --check .
+
+  build:
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - run: uv sync --extra dev
+
+      # One source tree, both toolchains. GCC here, MSVC there.
+      - name: Configure plugin
+        run: cmake -S plugin -B plugin/build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build plugin
+        run: cmake --build plugin/build --config Release --parallel
+
+      - name: Stage build output
+        run: cmake --install plugin/build --prefix dist --config Release
+
+      # layout_dump describes the structs the compiler actually produced. The
+      # Python mirror is asserted against it by the test suite below, on each
+      # platform; the artifacts feed the cross-platform comparison afterwards.
+      - name: Dump struct layout
+        shell: bash
+        run: |
+          if [ -f dist/layout_dump.exe ]; then
+            ./dist/layout_dump.exe > "layout-${{ matrix.os }}.json"
+          else
+            ./dist/layout_dump > "layout-${{ matrix.os }}.json"
+          fi
+          cat "layout-${{ matrix.os }}.json"
+
+      # Parsed from the binary rather than shelled out to nm or dumpbin:
+      # nm is not on Windows, dumpbin needs a Developer Command Prompt that a
+      # plain shell step does not have, and a check that runs on one platform
+      # only is not much of a check.
+      - name: Check the plugin exports its entry points
+        shell: bash
+        run: |
+          binary=dist/ets2ad_telemetry.so
+          [ -f "$binary" ] || binary=dist/ets2ad_telemetry.dll
+          uv run python scripts/check_exports.py "$binary" \
+            scs_telemetry_init scs_telemetry_shutdown \
+            scs_input_init scs_input_shutdown --exact
+
+      # Game and hardware tests are excluded: no ETS2 and no X server here.
+      # Everything else runs, including the replay tests, because the fake and
+      # replay PAL backends need neither.
+      - name: Test
+        run: uv run pytest -m "not game and not hardware" -v
+
+      - uses: actions/upload-artifact@v4
+        # With the account's storage spent the upload fails; the tests above
+        # have already said what this run is for.
+        continue-on-error: true
+        with:
+          name: layout-${{ matrix.os }}
+          path: layout-${{ matrix.os }}.json
+          # Only the ABI job of this run reads it.
+          retention-days: 1
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        continue-on-error: true
+        with:
+          name: plugin-${{ matrix.os }}
+          path: |
+            dist/ets2ad_telemetry.so
+            dist/ets2ad_telemetry.dll
+          # 1147 artifacts kept 90 days filled the storage quota (14 Nov 2026).
+          retention-days: 14
+
+  abi:
+    name: Cross-platform ABI
+    needs: build
+    runs-on: ubuntu-latest
+    # Its layouts come through the account's storage; spent, they cannot, and
+    # this shows red without failing the run. The layouts change only with
+    # plugin/ and core/bridge/layout.py.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: layout-*
+          merge-multiple: true
+      - name: Compare struct layouts
+        run: |
+          python scripts/compare_layouts.py \
+            layout-ubuntu-latest.json layout-windows-latest.json
+
+  portability:
+    name: Portability rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --extra dev
+      # Also covered by the test suite, but called out separately so a
+      # violation is obvious in the checks list rather than buried in a run.
+      - name: No OS-specific or ROS imports in core/
+        run: uv run pytest tests/unit/test_portability.py -v
+
+  map-extractor:
+    # The C# map extractor (ADR-0006) runs by hand, offline, and only when the
+    # game's map changes -- which is exactly how a tool rots unnoticed. It
+    # needs the game's archives to run, so CI can only prove it still builds
+    # against the TruckLib it pins; that is the part that breaks silently.
+    name: Map extractor builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Build
+        run: dotnet build tools/map_extract -warnaserror --nologo
+
+  package:
+    # A release for each platform, as a driver gets it: the sources, the
+    # plugin its own compiler built, and the map extractor self-contained.
+    # The detector is not in the repository, so these go without it.
+    name: Release package (${{ matrix.os }})
+    needs: [build, map-extractor]
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: uv sync
+      - name: Package
+        run: uv run python scripts/package.py --no-model
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: release-${{ matrix.os }}
+          path: dist/ets2ad-*.zip
+          retention-days: 14

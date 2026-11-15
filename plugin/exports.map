@@ -1,0 +1,14 @@
+/* Only the SDK entry points are visible.
+ *
+ * The game dlopen()s this library into its own process. Exporting anything
+ * else risks symbol collisions with the game or with another plugin, and
+ * those fail in ways that look like game bugs. */
+{
+    global:
+        scs_telemetry_init;
+        scs_telemetry_shutdown;
+        scs_input_init;
+        scs_input_shutdown;
+    local:
+        *;
+};

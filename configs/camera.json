@@ -1,0 +1,19 @@
+{
+  "format": "ets2ad-camera-1",
+  "focal_px": 819.0,
+  "horizon_row": 438.3,
+  "centre_col": 960.1,
+  "height_m": 2.881,
+  "frame_size": [
+    1920,
+    1080
+  ],
+  "measured_from": [
+    "traffic-01",
+    "traffic-02",
+    "city-01"
+  ],
+  "yaw_focal_px": 864.3,
+  "road_motion_pairs": 684,
+  "seat_right_m": -0.86
+}

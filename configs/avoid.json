@@ -1,0 +1,21 @@
+{
+ "places": [
+  {
+   "position": [
+    -2148.0,
+    -22400.0
+   ],
+   "radius": 150.0,
+   "note": "Denmark, by the border: a station's service road beside the main road; a tree at its side was hit twice"
+  },
+  {
+   "position": [
+    -36016.0,
+    -9168.0
+   ],
+   "radius": 10.0,
+   "all": true,
+   "note": "England: a motorway services' inner road, past the pumps, taken as the way through the junction it shares a prefab with"
+  }
+ ]
+}
