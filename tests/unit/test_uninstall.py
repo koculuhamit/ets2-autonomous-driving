@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -128,21 +129,22 @@ def test_the_game_is_seen_running_by_its_process(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("platform", ["linux", "win32"])
 def test_python_goes_before_uv_and_uv_last(platform: str) -> None:
-    plan = Plan(
-        python="3.12.15",
-        folder=Path("/home/a b/ets2ad"),
-        uv_files=[Path("/home/a b/.local/bin/uv")],
-        uv=Path("/home/a b/.local/bin/uv"),
-    )
+    home = Path("/home/a b")
+    uv, folder = home / ".local" / "bin" / "uv", home / "ets2ad"
+    plan = Plan(python="3.12.15", folder=folder, uv_files=[uv], uv=uv)
     lines = finishing_job(plan, platform)
-    python = next(i for i, line in enumerate(lines) if "python uninstall 3.12.15" in line)
-    folder = next(i for i, line in enumerate(lines) if "ets2ad" in line and "python" not in line)
-    uv = next(i for i, line in enumerate(lines) if line.rstrip("\"'").endswith("bin/uv"))
+
+    def where(text: str) -> int:
+        return next(i for i, line in enumerate(lines) if text in line)
+
+    python = where("python uninstall 3.12.15")
+    gone_folder = where(f"{folder}'" if platform == "linux" else f'{folder}"')
+    gone_uv = max(i for i, line in enumerate(lines) if str(uv) in line)
     assert lines[0].startswith(("sleep", "timeout")), "waits for this window first"
-    assert python < folder < uv
+    assert python < gone_folder < gone_uv
     assert "$0" in lines[-1] or "%~f0" in lines[-1], "and removes itself"
     if platform == "linux":
-        assert "'/home/a b/ets2ad'" in lines[folder], "a path with a space quoted"
+        assert shlex.quote(str(folder)) in lines[gone_folder], "a path with a space quoted"
 
 
 def _no_uv_on_path(monkeypatch: pytest.MonkeyPatch, bin_dir: Path) -> None:
