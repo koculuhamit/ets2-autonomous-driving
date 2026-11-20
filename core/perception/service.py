@@ -34,7 +34,13 @@ from typing import Any, Final
 import numpy as np
 
 from core.perception.blackbox import BlackBox
-from core.perception.cab import CAB_REFERENCE_FILE, in_cab, load_reference
+from core.perception.cab import (
+    CAB_REFERENCE_FILE,
+    DashboardLearner,
+    RoofLearner,
+    in_cab,
+    load_reference,
+)
 from core.perception.camera import GroundCamera
 from core.perception.detection import Kind
 from core.perception.lanes import lane_lines, lateral_at
@@ -178,10 +184,20 @@ class PerceptionService:
         rate_hz: float = 30.0,
         black_box: Path | None = None,
         cab_reference: Path = CAB_REFERENCE_FILE,
+        learn_cab: Path | None = None,
+        learn_roof: bool = False,
     ) -> None:
         """`black_box`: where `snapshot` writes the frames about a moment;
-        `cab_reference`: the truck's dashboard (core.perception.cab)."""
+        `cab_reference`: the truck's dashboard (core.perception.cab);
+        `learn_cab`: for a truck with none of its own, where to save the one
+        learned from the first frames (`cab_learned`), not checking the cab
+        until then; `learn_roof`: for a truck with no view of its own, find
+        where its windscreen begins and look from there (`view_learned`)."""
         self._cab_reference = cab_reference
+        self._learn_cab = learn_cab
+        self._cab_learned: Path | None = None
+        self._learn_roof = learn_roof
+        self._view_learned: float | None = None
         self._make_capture = make_capture
         self._black_box = black_box
         self._snapshots: mp.Queue = mp.Queue()
@@ -228,6 +244,8 @@ class PerceptionService:
                 self._keep_every,
                 self._held,
                 self._mirror_side,
+                self._learn_cab,
+                self._learn_roof,
             ),
             name="perception",
             daemon=True,
@@ -266,8 +284,26 @@ class PerceptionService:
                         self._kept.append(message)
                     elif isinstance(message, tuple) and message[0] == "slow":
                         self._slow.append(message[1])
+                    elif isinstance(message, tuple) and message[0] == "cab":
+                        self._cab_learned = Path(message[1])
+                    elif isinstance(message, tuple) and message[0] == "view":
+                        self._view_learned = float(message[1])
                     elif isinstance(message, str):
                         self.error = message
+
+    def cab_learned(self) -> Path | None:
+        """Where the truck's dashboard was saved, once, when learned
+        (`learn_cab`); None before, and after it has been asked."""
+        with self._lock:
+            learned, self._cab_learned = self._cab_learned, None
+        return learned
+
+    def view_learned(self) -> float | None:
+        """Where the windscreen was found to begin, as a share of the frame's
+        height, once (`learn_roof`); None before, and after it has been asked."""
+        with self._lock:
+            learned, self._view_learned = self._view_learned, None
+        return learned
 
     def latest(self) -> PerceptionReport | None:
         """The newest report so far; never blocks. None before the first."""
@@ -371,6 +407,8 @@ def _run(
     keep_every=None,
     held=None,
     mirror_side=None,
+    learn_cab: Path | None = None,
+    learn_roof: bool = False,
 ) -> None:
     """The child: grab, detect, track, report, until told to stop."""
     black_box = BlackBox() if black_box_dir is not None else None
@@ -383,6 +421,10 @@ def _run(
         return
     tracker = Tracker(camera)
     cab_reference = load_reference(cab_reference_file)
+    learner = DashboardLearner() if learn_cab is not None else None
+    roof = RoofLearner() if learn_roof and getattr(detector, "view", None) is not None else None
+    if learner is not None:
+        cab_reference = None  # another truck's: not checked against until learned
     sender.send(("ready", str(getattr(detector, "provider", ""))))
     kept_at = -math.inf
     try:
@@ -481,6 +523,25 @@ def _run(
                         clipped_at(track.box, view, frame.image.shape[1], frame.image.shape[0]),
                     )
                 )
+            if roof is not None and frame.image.shape[:2] == (1080, 1920):
+                row = roof.offer(frame.image, time.perf_counter())
+                if row is not None:
+                    roof = None
+                    widened = _widened(detector.view, row, frame.image.shape[0])
+                    if widened is not None:
+                        detector.view = widened
+                        sender.send(("view", widened.windscreen.top))
+            if learner is not None and frame.image.shape[:2] == (1080, 1920):
+                learned = learner.offer(frame.image, time.perf_counter())
+                if learned is not None:
+                    learner = None
+                    cab_reference = learned
+                    try:
+                        learn_cab.parent.mkdir(parents=True, exist_ok=True)
+                        np.save(learn_cab, learned)
+                        sender.send(("cab", str(learn_cab)))
+                    except OSError as exc:
+                        sender.send(("slow", f"the dashboard learned was not saved: {exc}"))
             cab = (
                 cab_reference is None
                 or frame.image.shape[:2] != (1080, 1920)
@@ -538,6 +599,26 @@ def _slow_turn(began: float, marks: list[tuple[str, float]]) -> str:
         parts.append(f"{name} {at - last:.2f} s")
         last = at
     return f"{last - began:.2f} s: " + ", ".join(parts)
+
+
+def _widened(view, row: int, height: int):
+    """`view` with its windscreen begun at `row`, if that is higher up than
+    it begins now: a view is only widened by what is learned, never cut.
+    Learned from a minute at a depot, an Actros's and a Volvo's came out at
+    286 and 313, under the 250 their windscreens do begin at."""
+    from dataclasses import replace
+
+    from core.perception.detection import Rect
+
+    top = row / height
+    screen = view.windscreen
+    if top >= screen.top - 10 / height or row < ROOF_LOWEST_ROW:
+        return None
+    return replace(view, windscreen=Rect(screen.left, top, screen.right, screen.bottom))
+
+
+ROOF_LOWEST_ROW = 80
+"""Above this the frame is the game's own: the mirror insets begin at 80."""
 
 
 def _keep(sender, frame) -> None:

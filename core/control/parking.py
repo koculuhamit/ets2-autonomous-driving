@@ -16,6 +16,7 @@ controller waits for the state to change before it will press again.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Final
 
@@ -28,7 +29,22 @@ SETTLE_S: Final = 1.0
 """How long to wait for the state to change after a press before trying again."""
 
 SET_AFTER_S: Final = 1.0
-"""Stopped and asked to stay stopped this long, set the parking brake."""
+"""Stopped on a slope (`SLOPE_MPS2`) and asked to stay stopped this long,
+set the parking brake: on a slope a truck left to the service brake rolled
+back within a quarter of a second."""
+
+FLAT_SET_AFTER_S: Final = 3.0
+SLOPE_MPS2: Final = 0.2
+"""On the flat -- gravity along the way under this, about 2 % -- the service
+brake holds the truck for a short stop, and the parking brake is set only
+after this: pulled at every stop it looked bad (the driver's word, 16
+November). Not much longer: the brake pedal held at a standstill is, to the
+game's gearbox, a wish to reverse, and at a red light near Eindhoven, after
+8.5 and 10.6 s on the brake alone, a Scania R went into reverse and rolled
+back (18 November, with 20 s here)."""
+
+REVERSE_AFTER_S: Final = 8.5
+"""The soonest the gearbox went into reverse on the brake held at rest."""
 
 STOPPED_MPS: Final = 0.2
 
@@ -73,14 +89,19 @@ class ParkingBrake:
             return True
         return False
 
-    def should_hold(self, *, speed: float, stopping: bool, now: float) -> bool:
-        """Whether a stop has lasted long enough to set the parking brake."""
+    def should_hold(
+        self, *, speed: float, stopping: bool, now: float, grade: float = math.inf
+    ) -> bool:
+        """Whether a stop has lasted long enough to set the parking brake:
+        `SET_AFTER_S` on a slope, `FLAT_SET_AFTER_S` on the flat; `grade`,
+        gravity along the way, m/s^2 (a slope, if not known)."""
         if not stopping or abs(speed) > STOPPED_MPS:
             self._stopped_since = None
             return False
         if self._stopped_since is None:
             self._stopped_since = now
-        return now - self._stopped_since >= SET_AFTER_S
+        after = SET_AFTER_S if abs(grade) >= SLOPE_MPS2 else FLAT_SET_AFTER_S
+        return now - self._stopped_since >= after
 
 
 @dataclass

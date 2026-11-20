@@ -57,6 +57,25 @@ from core.perception.detection import Detection, Kind
 __all__ = ["CrossingFilter", "Path", "Track", "Tracker", "lead_vehicle", "plausible"]
 
 MATCH_IOU: Final = 0.3
+
+JUMP_M: Final = 6.0
+JUMP_SHARE: Final = 0.3
+JUMP_MPS: Final = 30.0
+"""A track's distance changing between sightings by more than `JUMP_M`, or
+`JUMP_SHARE` of the nearer distance, and `JUMP_MPS` for the time between, is
+not a vehicle moving: the box's foot was not where it met the road. Its
+sightings begin again from there. Near Eindhoven a lorry's box was put at
+96 to 101 m, then 24 m, the same track: its history made it close at the
+truck's own 12 m/s, and the truck braked at 6.3 m/s^2 for it (18 November)."""
+
+
+def _jumped(last, now: float, distance: float) -> bool:
+    """Whether `distance` at `now` is a jump from the sighting `last`."""
+    then, before = last[0], last[1]
+    allowed = max(JUMP_M, JUMP_SHARE * min(before, distance)) + JUMP_MPS * max(now - then, 0.0)
+    return abs(distance - before) > allowed
+
+
 CONFIRM_HITS: Final = 3
 FORGET_AFTER_S: Final = 0.5
 HISTORY_S: Final = 1.0
@@ -77,6 +96,14 @@ SETTLED_SIGHTINGS: Final = 5
 MAX_VEHICLE_WIDTH_M: Final = 20.0
 """Wider than any vehicle seen from any side: a tractor and trailer broadside
 is about 16.5 m. A tunnel portal seen as a truck came out at 38 m."""
+
+CENTRED_LEAD_M: Final = 1.0
+WIDE_KINDS: Final = frozenset({"truck", "bus"})
+"""A lorry or a bus this near the lane's middle is followed however wide it
+is measured (up to `MAX_VEHICLE_WIDTH_M`): through another truck's camera a
+DAF XD measured the lorry ahead 6.6 to 11.7 m wide, let it go as too wide to
+be ahead, and ran into its back at 80 km/h (15 November). One going across
+is the crossing filter's to leave out, as before."""
 
 MAX_LEAD_WIDTH_M: Final = 6.0
 """A vehicle ahead in the same lane shows its back, perhaps a little of its
@@ -283,6 +310,11 @@ class Tracker:
             return
         where = self.camera.locate(found.box)
         if where is not None:
+            if track.sightings and _jumped(track.sightings[-1], now, where[0]):
+                # The same box, its distance no vehicle could cover: one of the
+                # two was not where it met the road. Its history would make a
+                # closing speed of the jump.
+                track.sightings.clear()
             track.sightings.append((now, *where, found.box[2] - found.box[0]))
         while track.sightings and now - track.sightings[0][0] > HISTORY_S:
             track.sightings.popleft()
@@ -345,7 +377,10 @@ def lead_vehicle(
             inner = (lateral - middle) - clipped * width / 2.0
             if -clipped * inner < -CLIPPED_REACH_M:
                 continue
-        in_path = abs(lateral - middle) <= PATH_HALF_WIDTH_M and width <= MAX_LEAD_WIDTH_M
+        off = abs(lateral - middle)
+        in_path = (off <= PATH_HALF_WIDTH_M and width <= MAX_LEAD_WIDTH_M) or (
+            off <= CENTRED_LEAD_M and str(track.kind) in WIDE_KINDS and width <= MAX_VEHICLE_WIDTH_M
+        )
         if not in_path and track.id not in cutting_in:
             continue
         if track.id in exclude:

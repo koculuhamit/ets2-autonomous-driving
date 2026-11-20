@@ -1,6 +1,7 @@
 """Per-truck calibration: what is measured for a truck, and read back for it."""
 
 from core.calibration.profile import (
+    DEFAULTS_TRUCK,
     PROFILES_DIR,
     TruckProfile,
     fit_brake,
@@ -11,6 +12,7 @@ from core.calibration.profile import (
 )
 
 __all__ = [
+    "DEFAULTS_TRUCK",
     "PROFILES_DIR",
     "TruckProfile",
     "fit_brake",

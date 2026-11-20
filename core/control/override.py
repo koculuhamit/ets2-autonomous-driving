@@ -48,7 +48,37 @@ from typing import Final
 
 from core.control.steering import STEERING_CALIBRATION, SteeringCalibration
 
-__all__ = ["OverrideDetector", "OverrideEvent"]
+__all__ = ["OverrideDetector", "OverrideEvent", "RecentPedals"]
+
+PEDAL_LAG_S: Final = 0.4
+"""How long a pedal sent may still be what the game shows: its frames come
+late now and then. Near Venlo (18 November) the game stood still for
+0.15 s as the stack let the throttle go from 1.0 to 0.23; it showed 0.53,
+sent a moment before, and the truck was handed over for a foot on the
+throttle that was not there."""
+
+
+class RecentPedals:
+    """The most of each pedal sent within `PEDAL_LAG_S`: what the game may
+    still be showing as the stack's."""
+
+    def __init__(self, lag: float = PEDAL_LAG_S) -> None:
+        self._lag = lag
+        self._sent: list[tuple[float, float, float]] = []
+
+    def add(self, now: float, throttle: float, brake: float) -> None:
+        self._sent.append((now, throttle, brake))
+        self._sent = [s for s in self._sent if now - s[0] <= self._lag]
+
+    def clear(self) -> None:
+        self._sent = []
+
+    def most(self) -> tuple[float, float] | None:
+        """(throttle, brake), each the most sent lately; None if nothing."""
+        if not self._sent:
+            return None
+        return max(s[1] for s in self._sent), max(s[2] for s in self._sent)
+
 
 #: Pedal difference that counts as someone else pressing, in command units.
 DEFAULT_PEDAL_TOLERANCE: Final = 0.08

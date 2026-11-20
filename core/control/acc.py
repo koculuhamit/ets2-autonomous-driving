@@ -84,6 +84,15 @@ as the truck; it drew away out of view, was remembered standing, and the
 truck braked at 7 m/s^2 from 77 km/h to a stop in the fast lane. One
 moving is lost for a moment (`LEAD_HOLD_S`), not stopped for."""
 
+OUT_OF_VIEW_BEND_RAD: Final = math.radians(20.0)
+OUT_OF_VIEW_BEND_PAST_M: Final = 10.0
+"""A lead the path bends away to by this much, out of view, is not
+remembered standing there, nor held stopped close up: it went round the
+bend, out of the camera's view. Round a tight right turn in Leipzig a lorry
+ahead at 7 km/h was remembered standing 14 m on, out of view, and the truck
+stopped in the turn for it twice, set the parking brake and crept on
+(16 November)."""
+
 REMEMBER_AT_MOST_S: Final = 10.0
 GREEN_FOR_S: Final = 3.0
 """A lead remembered, not seen again for `REMEMBER_AT_MOST_S`, with the light
@@ -164,11 +173,20 @@ while 36 to 21 m ahead, and had to be followed."""
 TIGHT_LOOK_M: Final = 60.0
 TIGHT_CLEAR_M: Final = 6.0
 TIGHT_WAIT_AT_MOST_S: Final = 20.0
-TIGHT_THROUGH_MPS: Final = 8.0 / 3.6
-"""Through a tight turn no faster than this, slowed to by its start at
-`JUNCTION_APPROACH_DECELERATION`: kept to its lane round it (the driver's
-rule, 11 November), the truck runs wider the faster it goes; at Bergen, at
-8 to 10 km/h, 0.5 to 0.9 m wide of its line."""
+MOUTH_CLEAR_M: Final = 5.0
+MOUTH_SEEN_M: Final = 60.0
+"""The mouth of the road a tight turn goes into is clear when most of it is
+in view, nearer than `MOUTH_SEEN_M`, and nothing seen -- confirmed or not --
+is within `MOUTH_CLEAR_M` of it (`AdaptiveCruise.mouth_clear`): the truck
+then goes round wide, over it (core.planning.tight_turns.wide_turn)."""
+
+TIGHT_LATE_DECELERATION: Final = 2.0
+"""A vehicle first seen in a tight turn when stopping short of it would take
+more than this is not waited for: the truck is at the turn already, and
+goes on, a vehicle in its way followed as any other. A Renault Magnum came
+up to two tight turns in Sheffield at 10 km/h, saw a car in each 0 to 1 m
+short of where to wait, and braked at 7 m/s^2 for it (16 November)."""
+
 TIGHT_STANDING_MPS: Final = 0.5
 TIGHT_WHY: Final = "waiting for the junction to clear for a tight turn"
 """Coming to a tight turn (core.planning.tight_turns), from `TIGHT_LOOK_M`
@@ -188,19 +206,6 @@ lorry takes about that to clear the lane. Out of Mannheim the truck turned
 left in front of a car coming the other way, which it saw only 6.9 m off,
 and hit it. Once in the turn it goes on: stopped in the oncoming lane is
 worse."""
-
-TURN_SLOWING_FROM_M: Final = 200.0
-TURN_APPROACH_DECELERATION: Final = 0.35
-TURN_CREEP_MPS: Final = 3.0
-"""Coming to a turn across the oncoming lanes, from `TURN_SLOWING_FROM_M`
-before it, the truck keeps to a speed from which it slows to this crawl,
-about 10 km/h, at the turn at this deceleration -- little more than coasting
-gives, under what the brake is taken up for: a car coming the other way,
-seen late, is then waited for in comfort, and with none the turn is driven
-on through at the crawl and out of. At 1.5 m/s^2 the cap fell faster than
-the truck slows coasting; braked for -- no lighter than 1.8 m/s^2, taken up
-and let off late -- it went from 19 km/h to 1.5 in the middle of a junction
-in Bremen, nothing coming."""
 
 RING_SIDE_PX: Final = 250.0
 """A vehicle with no distance this far off the view's middle, on the side
@@ -231,14 +236,6 @@ vehicle on the ring seen as it gets there; the clear way in is taken without
 stopping. At 16 km/h, in Malmö, a police car coming round from the left was
 in the windscreen for a moment as the truck came in, and was hit: the
 ring's last metres to the entry are behind the cab's pillar."""
-
-RING_THROUGH_MPS: Final = 12.0 / 3.6
-RING_CLEAR_M: Final = 10.0
-"""Once in a roundabout, round it and out of it no faster than this, until
-this far past the end of its lanes: in Italy, at night, the truck took the
-first way out at 8 km/h on its line, then sped up to 19 km/h still turning,
-ran 0.3 m wider than its line, and its cab hit the direction sign on the
-island beside the way out."""
 
 PREFAB_AHEAD_M: Final = 30.0
 PREFAB_BESIDE_M: Final = 12.0
@@ -323,6 +320,15 @@ away faster than `MOVING_OFF_MPS` for `MOVING_OFF_S`, is the traffic at the
 light going (`traffic_going`): in Bern a lorry drew up in the lane on the
 right, hid the red the truck was waiting at, and the truck could not see it
 go green."""
+
+ONCOMING_OWN_MPS: Final = 8.0
+"""A vehicle seen coming towards the truck at this or more of its own is
+coming the other way, wherever it seems to be: round a left-hand bend near
+Salzburg (18 November) a car in the oncoming lane, 4 to 6 m to the left,
+came from 115 m to 13 m in a second where the bend put the truck's lane;
+taken for one standing in it, the truck braked at 8.6 m/s^2 to a stop.
+Slower than this, one is taken to stand at most: on another truck's camera,
+cars standing at a red seemed to come at up to 17 km/h (Duisburg)."""
 
 OUT_OF_CAB_S: Final = 1.0
 """The game's camera out of the cab this long, the road is not seen as
@@ -449,7 +455,7 @@ def prefab_spans(route, path: ReferencePath) -> list[tuple[float, float]]:
 def ring_way_spans(route, path: ReferencePath) -> list[tuple[float, float]]:
     """Where `path` goes through a roundabout, as (start, end) metres along
     it: from the way into it to the end of the last of its lanes the route
-    takes, the way out (`RING_THROUGH_MPS`)."""
+    takes, the way out."""
     network = route.network
     owners = network.lane_owner
     ways: list[tuple[float, float]] = []
@@ -816,6 +822,8 @@ class AdaptiveCruise:
         """(track id, where along the path, own speed, time) the lead was last seen."""
         self._give_way: _GiveWay | None = None
         self._out_of_cab_since: float | None = None
+        self.out_of_cab_s = 0.0
+        """How long the game's camera has been out of the cab, seconds."""
         self._moving_off: dict[int, float] = {}
         """Track id -> since when it has been going away, while standing."""
         self.traffic_going = False
@@ -860,7 +868,7 @@ class AdaptiveCruise:
         self.prefabs: list[tuple[float, float]] = []
         """Stretches of the path through junctions (`prefab_spans`)."""
         """Stretches of the path through roundabouts, into them and out
-        (`ring_way_spans`): taken no faster than `RING_THROUGH_MPS`."""
+        (`ring_way_spans`)."""
 
     def step(
         self,
@@ -878,16 +886,15 @@ class AdaptiveCruise:
         result = self._step(
             report, now, path=path, progress=progress, x=x, z=z, course=course, speed=speed
         )
-        cap, why = self._turn_cap(progress), "a turn across the oncoming lanes"
-        ring = self._ring_cap(progress)
-        if ring is not None and (cap is None or ring < cap):
-            cap, why = ring, "a roundabout"
+        # No crawl short of a turn across the oncoming lanes, nor through a
+        # tight turn or round a roundabout: the driver's word (16 November),
+        # the bend's own speed (core.planning.speed_profile) and no lower --
+        # crawling round at 8 to 12 km/h, braking and stopping in the turn,
+        # looked bad. What is waited for short of a turn is still waited for.
+        cap, why = self._ring_cap(progress), "a roundabout"
         junction = self._junction_cap(progress)
         if junction is not None and (cap is None or junction < cap):
             cap, why = junction, "a junction"
-        tight = self._tight_cap(progress)
-        if tight is not None and (cap is None or tight < cap):
-            cap, why = tight, "a tight turn"
         target = result.decision.target_speed
         if cap is None or (target is not None and target <= cap):
             return result
@@ -901,7 +908,7 @@ class AdaptiveCruise:
     def _ring_cap(self, progress: float) -> float | None:
         """Short of a roundabout, the speed the truck can stop at its entry
         from in comfort, no lower than `RING_ENTRY_MPS`; through it and out,
-        `RING_THROUGH_MPS`; None elsewhere. It
+        None elsewhere. It
         came at one near Duisburg at 32 km/h, and the lorry coming round,
         seen late, was hit."""
         for start, _, _ in self.rings:
@@ -910,25 +917,7 @@ class AdaptiveCruise:
                 return max(
                     math.sqrt(2.0 * RING_APPROACH_DECELERATION * max(room, 0.0)), RING_ENTRY_MPS
                 )
-        for start, end in self.ring_ways:
-            if start <= progress <= end + RING_CLEAR_M:
-                return RING_THROUGH_MPS
         return None
-
-    def _tight_cap(self, progress: float) -> float | None:
-        """Short of a tight turn, the speed from which the truck slows to
-        `TIGHT_THROUGH_MPS` by its start; that speed through it; None elsewhere."""
-        caps = []
-        for start, end, _ in self.tight_turns:
-            room = start - progress
-            if progress > end or room > 500.0:
-                continue
-            caps.append(
-                math.sqrt(
-                    TIGHT_THROUGH_MPS**2 + 2.0 * JUNCTION_APPROACH_DECELERATION * max(room, 0.0)
-                )
-            )
-        return min(caps) if caps else None
 
     def _junction_cap(self, progress: float) -> float | None:
         """Short of a junction crossed on the level, the speed from which the
@@ -945,19 +934,6 @@ class AdaptiveCruise:
                 )
             )
         return min(caps) if caps else None
-
-    def _turn_cap(self, progress: float) -> float | None:
-        """Short of a turn across the oncoming lanes, the speed it can still
-        be stopped short of in comfort, no lower than `TURN_CREEP_MPS`; None
-        elsewhere. Out of Frankfurt the truck came at a left turn at 36 km/h
-        and, an oncoming car seen 11 m short, braked at 6.8 m/s^2."""
-        for start, _ in self.turns_across:
-            room = start - progress - STOP_BEFORE_TURN_M
-            if -STOP_BEFORE_TURN_M <= room <= TURN_SLOWING_FROM_M:
-                return math.sqrt(
-                    TURN_CREEP_MPS**2 + 2.0 * TURN_APPROACH_DECELERATION * max(room, 0.0)
-                )
-        return None
 
     def _step(
         self,
@@ -980,9 +956,11 @@ class AdaptiveCruise:
             raise PerceptionLost(f"the newest view of the road is {age:.2f} s old")
         if getattr(report, "in_cab", True):
             self._out_of_cab_since = None
+            self.out_of_cab_s = 0.0
         elif self._out_of_cab_since is None:
             self._out_of_cab_since = now
         elif now - self._out_of_cab_since >= OUT_OF_CAB_S:
+            self.out_of_cab_s = now - self._out_of_cab_since
             raise OutOfCab(
                 "the game's camera is not in the cab as calibrated: switch to the cab view (1)"
                 " and put the seat and head back where they were"
@@ -1047,6 +1025,8 @@ class AdaptiveCruise:
                 self._remembered_at = now
         self._watch_for_give_way(report.tracks, progress, speed, now, oncoming, report.unseen)
         self._watch_tight_turn(report.tracks, progress, x, z, course, speed, now)
+        self._seen = (report.tracks, x, z, course)
+        self._path = path
         giving = self._giving_way(progress, speed, now)
         step = self._following(found, remembered, now, progress, speed, age)
         hidden = self._foot_hidden(report, lane)
@@ -1153,6 +1133,40 @@ class AdaptiveCruise:
             del self._afar[gone]
         return frozenset(found)
 
+    def mouth_clear(self, mouth) -> bool:
+        """Whether nothing is seen within `MOUTH_CLEAR_M` of the points
+        `mouth` (`(n, 2)` world x, z), most of them in view
+        (`MOUTH_SEEN_M`, the camera's width): unseen is not clear."""
+        seen = getattr(self, "_seen", None)
+        mouth = np.asarray(mouth, float)
+        if seen is None or len(mouth) == 0:
+            return False
+        tracks, x, z, course = seen
+        ahead = np.array([math.sin(course), math.cos(course)])
+        right = np.array([-math.cos(course), math.sin(course)])
+        relative = mouth - np.array([x, z])
+        forward = relative @ ahead
+        aside = relative @ right
+        half_view = math.atan2(self.camera.centre_col, self.camera.focal_px)
+        in_view = (
+            (forward > 1.0)
+            & (np.hypot(forward, aside) <= MOUTH_SEEN_M)
+            & (np.abs(np.arctan2(aside, np.maximum(forward, 1e-6))) <= half_view)
+        )
+        if in_view.mean() < 0.5:
+            return False
+        for track in tracks:
+            estimate = track.estimate()
+            if estimate is None:
+                continue
+            distance, _, lateral, _ = estimate
+            where = (
+                np.array([x, z]) + distance * ahead + (lateral + self.camera.seat_right_m) * right
+            )
+            if float(np.min(np.hypot(*(mouth - where).T))) <= MOUTH_CLEAR_M:
+                return False
+        return True
+
     def _watch_tight_turn(
         self, tracks, progress: float, x: float, z: float, course: float, speed: float, now: float
     ) -> None:
@@ -1192,6 +1206,10 @@ class AdaptiveCruise:
         held = self._give_way
         if held is not None and held.stop_s <= stop_s and held.why != TIGHT_WHY:
             return  # stopping sooner for something else already
+        waiting = held is not None and held.why == TIGHT_WHY and held.stop_s == stop_s
+        room = stop_s - progress
+        if not waiting and (room <= 0.0 or speed * speed / (2.0 * room) > TIGHT_LATE_DECELERATION):
+            return  # seen too late to wait short of the turn in comfort
         self._give_way = _GiveWay(stop_s, start, nearest[0], now, TIGHT_WHY)
 
     def _watch_for_give_way(
@@ -1286,7 +1304,16 @@ class AdaptiveCruise:
             self._give_way = None
             return None
         room = held.stop_s - progress
-        return stop_short(room, speed, f"{held.why}, {max(room, 0.0):.0f} m on"), held.track_id
+        # Come on late, the truck may stop past the place: short of the
+        # vehicle crossing by the least gap, not the standstill gap; at the
+        # turn, not 2 m short of it.
+        slack = (
+            self.policy.standstill_gap_m - self.policy.min_gap_m
+            if held.why == "giving way to a vehicle crossing"
+            else STOP_BEFORE_TURN_M
+        )
+        decision = stop_short(room, speed, f"{held.why}, {max(room, 0.0):.0f} m on", slack)
+        return decision, held.track_id
 
     def forget_lead(self) -> None:
         """The vehicle followed or remembered is not in the way any more: a
@@ -1344,7 +1371,7 @@ class AdaptiveCruise:
             and then - since[1] >= REMEMBER_AFTER_S
             and at >= since[2] - REMEMBER_STILL_M
         )
-        if held_long and place < CLOSE_HOLD_M:
+        if held_long and place < CLOSE_HOLD_M and not self._bends_before(progress, place):
             if lost <= CLOSE_HOLD_S:
                 return track_id, place, 0.0
             self._creep_until = progress + max(place, 0.0) + CREEP_PAST_M
@@ -1386,6 +1413,25 @@ class AdaptiveCruise:
             self._standing_since = None
             return CruiseStep(follow(None, speed, self.policy), None, None, age)
         track, (distance, closing, _, _) = found
+        towards = -(speed + closing)  # its own speed towards the truck
+        if towards >= ONCOMING_OWN_MPS:
+            # Coming the other way: not followed, nor remembered standing,
+            # nor held when it goes by out of view.
+            self._last_lead = None
+            self._remembered = None
+            self._standing_since = None
+            return CruiseStep(
+                FollowingDecision(None, None, "oncoming: not a lead"), None, None, age
+            )
+        if 0.0 < towards < ONCOMING_OWN_MPS and not self._in_a_junction(progress, ahead=distance):
+            # In the truck's lane on the open road nothing comes towards it:
+            # at most it stands. With another truck's camera a DAF misjudged
+            # distances by half again, cars stopping at red lights seemed to
+            # come at 17 km/h, were let go as oncoming (core.control.following),
+            # and were braked for at 6 to 9 m/s^2 from 18 to 30 m (Duisburg,
+            # 15 November). Through a junction one coming the other way is
+            # still not followed.
+            closing = -speed
         standing = speed + closing < REMEMBER_BELOW_MPS
         if not standing:
             self._remembered = None
@@ -1397,7 +1443,11 @@ class AdaptiveCruise:
                 or abs(place - self._standing_since[1]) > REMEMBER_STILL_M
             ):
                 self._standing_since = (now, place)
-            if distance < REMEMBER_WITHIN_M and now - self._standing_since[0] >= REMEMBER_AFTER_S:
+            if (
+                distance < REMEMBER_WITHIN_M
+                and now - self._standing_since[0] >= REMEMBER_AFTER_S
+                and not self._bends_before(progress, distance)
+            ):
                 self._remembered = (distance, progress)
                 self._remembered_at = now
         own_speed = self._smoothed_speed(track.id, speed + closing, now)
@@ -1447,6 +1497,21 @@ class AdaptiveCruise:
     def _near_a_ring(self, s: float) -> bool:
         """Whether `s` is in a roundabout, or within `CROSSING_WITHIN_M` of one."""
         return any(start - CROSSING_WITHIN_M <= s <= end for start, end, _ in self.rings)
+
+    def _bends_before(self, progress: float, distance: float) -> bool:
+        """Whether the path turns by `OUT_OF_VIEW_BEND_RAD` or more between
+        the truck and `distance` metres on (and `OUT_OF_VIEW_BEND_PAST_M`
+        past): a vehicle there goes out of the camera's view round the bend,
+        not out of the way."""
+        path = getattr(self, "_path", None)
+        if path is None:
+            return False
+        here = path.sample_at(max(progress, 0.0)).heading
+        for along in np.arange(2.0, max(distance, 0.0) + OUT_OF_VIEW_BEND_PAST_M, 2.0):
+            there = path.sample_at(min(progress + float(along), path.length)).heading
+            if abs(math.remainder(there - here, 2.0 * math.pi)) >= OUT_OF_VIEW_BEND_RAD:
+                return True
+        return False
 
     def _in_a_junction(self, s: float, ahead: float = 0.0) -> bool:
         """Whether `s`, or `ahead` metres past it, is where the route crosses

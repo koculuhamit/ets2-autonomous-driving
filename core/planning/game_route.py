@@ -61,10 +61,9 @@ from core.planning.route import (
     CHANGE,
     FERRY,
     ONWARD,
-    WAYPOINT_RADIUS_M,
     Route,
     RouteError,
-    _onto_road,
+    gate_lanes,
 )
 
 __all__ = [
@@ -212,9 +211,8 @@ def _gate_goals(network: RoadNetwork, depot: CompanyPlace) -> list[dict[int, flo
     found = []
     for gate in depot.gates:
         goals: dict[int, float] = {}
-        x, z = _onto_road(network, gate)
-        for lane in network.lanes_near(x, z, WAYPOINT_RADIUS_M):
-            lane = int(lane)
+        (x, z), lanes = gate_lanes(network, gate)
+        for lane in lanes:
             along = nav_along(network, lane, network.project(lane, x, z).s)
             goals[lane] = min(goals.get(lane, math.inf), along)
         found.append(goals)

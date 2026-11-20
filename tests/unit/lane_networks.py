@@ -21,11 +21,23 @@ def polyline(*corners: tuple[float, float], spacing: float = 2.0) -> np.ndarray:
     return np.array(points)
 
 
-def network(lanes: list[np.ndarray], successors=(), changes=()) -> RoadNetwork:
-    """A compiled network of these lanes, joined as stated and no other way."""
+def network(
+    lanes: list[np.ndarray], successors=(), changes=(), public=None, prefabs=()
+) -> RoadNetwork:
+    """A compiled network of these lanes, joined as stated and no other way.
+    Every lane carries the game's traffic, as a road does, unless `public`
+    names the ones that do: the others are a yard's. Those in `prefabs` are
+    a junction's lanes, the others a road's."""
     graph = LaneGraph()
     for index, points in enumerate(lanes):
-        graph.lanes.append(Lane(points=points, source="road", owner=f"{index + 1:016X}"))
+        graph.lanes.append(
+            Lane(
+                points=points,
+                source="prefab" if index in prefabs else "road",
+                owner=f"{index + 1:016X}",
+                ai_vehicles=public is None or index in public,
+            )
+        )
     for a, b in successors:
         graph.connect(a, b)
     for a, b in changes:

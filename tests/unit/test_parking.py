@@ -65,3 +65,25 @@ def test_a_stop_is_not_undone_by_the_target_wandering_over_the_threshold() -> No
     assert latch.stopping(target=1.0, speed=0.0, **kw)
     assert not latch.stopping(target=RESUME_TARGET_MPS, speed=0.0, **kw), "the lead has moved off"
     assert not latch.stopping(target=1.0, speed=1.2, **kw), "moving again, no latch"
+
+
+def test_on_the_flat_the_parking_brake_waits_for_a_long_stop() -> None:
+    """Pulled at every stop, in the middle of turns too, it looked bad (the
+    driver's word, 16 November): on the flat the service brake holds."""
+    from core.control.parking import FLAT_SET_AFTER_S, SLOPE_MPS2
+
+    brake = ParkingBrake()
+    assert not brake.should_hold(speed=0.0, stopping=True, now=0.0, grade=0.05)
+    assert not brake.should_hold(speed=0.0, stopping=True, now=SET_AFTER_S + 1.0, grade=0.05)
+    assert brake.should_hold(speed=0.0, stopping=True, now=FLAT_SET_AFTER_S + 0.1, grade=0.05)
+    sloped = ParkingBrake()
+    assert not sloped.should_hold(speed=0.0, stopping=True, now=0.0, grade=-SLOPE_MPS2)
+    assert sloped.should_hold(speed=0.0, stopping=True, now=SET_AFTER_S + 0.1, grade=-SLOPE_MPS2)
+
+
+def test_on_the_flat_the_parking_brake_is_set_well_before_the_gearbox_reverses() -> None:
+    """Near Eindhoven, the brake held at a red for 8.5 s, the gearbox went
+    into reverse and the truck rolled back."""
+    from core.control.parking import FLAT_SET_AFTER_S, REVERSE_AFTER_S
+
+    assert FLAT_SET_AFTER_S + 2.0 * SETTLE_S < REVERSE_AFTER_S

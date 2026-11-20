@@ -389,15 +389,20 @@ def test_short_of_a_left_turn_the_oncoming_car_is_waited_for() -> None:
     other way at 15 m/s, 50 m off, and hit it."""
     from core.control.following import STOP_DECELERATION
 
-    step = turning_cruise(progress=10.0, speed=8.0, track=oncoming_car(50.0, -23.0))
-    assert "oncoming" in step.decision.reason
-    from core.control.acc import TURN_APPROACH_DECELERATION, TURN_CREEP_MPS
-
+    cruise = AdaptiveCruise(CAMERA)
+    cruise.turns_across = [(30.0, 60.0)]
+    kwargs = dict(path=STRAIGHT, progress=10.0, x=0.0, z=10.0, course=0.0, speed=8.0)
+    for k in range(6):
+        t = 100.0 + k / 20
+        step = cruise.step(report(oncoming_car(50.0, -23.0), grabbed_at=t), t + 0.05, **kwargs)
+    assert cruise._give_way is not None
+    assert cruise._give_way.why == "waiting for the oncoming traffic"
     room = 30.0 - 2.0 - 10.0
-    stopping = math.sqrt(2 * STOP_DECELERATION * room)
-    crawl = math.sqrt(TURN_CREEP_MPS**2 + 2 * TURN_APPROACH_DECELERATION * room)
-    assert step.decision.target_speed == pytest.approx(min(stopping, crawl))
-    assert step.decision.urgent_deceleration is None, "stopped for in comfort"
+    assert step.decision.target_speed <= math.sqrt(2 * STOP_DECELERATION * room) + 1e-6
+    from core.control.following import COMFORT_DECELERATION
+
+    urgent = step.decision.urgent_deceleration
+    assert urgent is None or urgent <= COMFORT_DECELERATION, "stopped for in comfort"
 
 
 def test_once_waiting_for_the_oncoming_traffic_it_waits_until_the_way_is_clear() -> None:
@@ -420,7 +425,6 @@ def test_once_waiting_for_the_oncoming_traffic_it_waits_until_the_way_is_clear()
     assert all("waiting for the oncoming" in s.decision.reason for s in still)
     assert all(s.decision.target_speed == pytest.approx(3.0) for s in still)
     assert "waiting for the oncoming" not in steps[2.0].decision.reason
-    assert steps[2.0].decision.target_speed is not None  # still slowing for the turn
 
 
 def test_a_lead_lost_for_a_moment_is_still_followed() -> None:
@@ -483,39 +487,13 @@ def test_a_left_turn_is_where_the_route_crosses_a_lane_coming_the_other_way() ->
     assert turn_across_spans(Route(junction(False), (0, 1), (ONWARD,)), path) == []
 
 
-def test_coming_to_a_left_turn_the_truck_slows_to_what_it_can_stop_from_in_comfort() -> None:
-    """Out of Frankfurt it came at a left turn at 36 km/h, saw an oncoming
-    car 11 m short, and braked at 6.8 m/s^2."""
-    from core.control.acc import TURN_APPROACH_DECELERATION, TURN_CREEP_MPS
-
+def test_coming_to_a_left_turn_with_nothing_coming_the_truck_does_not_crawl() -> None:
+    """The driver's word (16 November): no crawl short of a turn, the bend's
+    own speed; what is coming is still waited for."""
     clear = TrackReport(9, "car", True, True, 200.0, 0.0, 30.0, 1.9)
-    near = turning_cruise(progress=20.0, speed=10.0, track=clear)
-    room = 30.0 - 20.0 - 2.0
-    assert near.decision.target_speed == pytest.approx(
-        math.sqrt(TURN_CREEP_MPS**2 + 2.0 * TURN_APPROACH_DECELERATION * room)
-    )
-    at_it = turning_cruise(progress=29.0, speed=3.0, track=clear)
-    assert at_it.decision.target_speed == pytest.approx(TURN_CREEP_MPS)
-    far = turning_cruise(progress=-300.0, speed=20.0, track=clear)
-    assert far.decision.target_speed is None
-
-
-def test_the_cap_short_of_a_left_turn_falls_slower_than_the_truck_coasts_down() -> None:
-    """In Bremen the cap fell at 1.5 m/s^2; braked for, the truck went from
-    19 km/h to 1.5 in the middle of the junction, nothing coming. Gentler
-    than the lightest brake, it is coasted down to, and the turn driven at
-    a crawl."""
-    from core.control.acc import TURN_APPROACH_DECELERATION, TURN_CREEP_MPS
-
-    assert TURN_APPROACH_DECELERATION < 0.5, "under what the brake is taken up for (0.9)"
-    clear = TrackReport(9, "car", True, True, 200.0, 0.0, 30.0, 1.9)
-    caps = [
-        turning_cruise(progress=p, speed=5.0, track=clear).decision.target_speed
-        for p in (-80.0, 0.0, 20.0, 28.0)
-    ]
-    assert all(c is not None for c in caps)
-    assert caps == sorted(caps, reverse=True)
-    assert caps[-1] == pytest.approx(TURN_CREEP_MPS)
+    for progress, speed in ((20.0, 10.0), (29.0, 3.0), (-300.0, 20.0)):
+        step = turning_cruise(progress=progress, speed=speed, track=clear)
+        assert step.decision.target_speed is None, step.decision.reason
 
 
 def test_with_the_game_s_camera_out_of_the_cab_the_truck_stops() -> None:
@@ -534,8 +512,12 @@ def test_with_the_game_s_camera_out_of_the_cab_the_truck_stops() -> None:
     with pytest.raises(OutOfCab, match="camera"):
         later = replace(report(grabbed_at=100.0 + OUT_OF_CAB_S), in_cab=False)
         cruise.step(later, 100.05 + OUT_OF_CAB_S, **kwargs)
+    # How long it has been out: tools/follow.py slows for a look about, and
+    # stops the drive only for a camera out for good (OUT_OF_CAB_GIVE_UP_S).
+    assert cruise.out_of_cab_s == pytest.approx(OUT_OF_CAB_S)
     back = replace(report(grabbed_at=102.0), in_cab=True)
     cruise.step(back, 102.05, **kwargs)
+    assert cruise.out_of_cab_s == 0.0
 
 
 def test_standing_the_traffic_alongside_moving_off_is_seen() -> None:
@@ -710,8 +692,10 @@ def test_the_way_through_a_roundabout_runs_from_its_entry_to_its_way_out() -> No
     assert way[1] == pytest.approx(path.length, abs=2.0), "to the end of the ring's last lane"
 
 
-def test_through_a_roundabout_and_out_the_truck_does_not_speed_up() -> None:
-    from core.control.acc import RING_CLEAR_M, RING_ENTRY_MPS, RING_THROUGH_MPS
+def test_round_a_roundabout_and_out_no_crawl_once_in() -> None:
+    """Edged into, as a driver would; round it and out at the bend's own
+    speed (the driver's word, 16 November: not 12 km/h)."""
+    from core.control.acc import RING_ENTRY_MPS
 
     cruise = AdaptiveCruise(CAMERA)
     cruise.rings = [(60.0, 70.0, -1)]
@@ -720,13 +704,9 @@ def test_through_a_roundabout_and_out_the_truck_does_not_speed_up() -> None:
     edging = cruise.step(report(grabbed_at=100.0), 100.05, progress=62.0, **kwargs)
     assert edging.decision.target_speed == pytest.approx(RING_ENTRY_MPS)
     round_ = cruise.step(report(grabbed_at=100.1), 100.15, progress=80.0, **kwargs)
-    assert round_.decision.target_speed == pytest.approx(RING_THROUGH_MPS)
-    out = cruise.step(report(grabbed_at=100.2), 100.25, progress=100.0 + RING_CLEAR_M - 1, **kwargs)
-    assert out.decision.target_speed == pytest.approx(RING_THROUGH_MPS), "trailer still turning"
-    clear = cruise.step(
-        report(grabbed_at=100.3), 100.35, progress=100.0 + RING_CLEAR_M + 1, **kwargs
-    )
-    assert clear.decision.target_speed is None or clear.decision.target_speed > RING_THROUGH_MPS
+    assert round_.decision.target_speed is None
+    out = cruise.step(report(grabbed_at=100.2), 100.25, progress=105.0, **kwargs)
+    assert out.decision.target_speed is None
 
 
 def test_coming_to_a_roundabout_the_truck_slows_to_take_it_as_a_driver_would() -> None:
@@ -801,38 +781,6 @@ def test_into_a_roundabout_a_vehicle_seen_coming_round_is_waited_for_out_of_sigh
             report(parked, grabbed_at=100.0 + k / 5), 100.05 + k / 5, progress=25.0 + k, **kwargs
         )
     assert step.lead_id is None, "a parked car is not the ring's traffic"
-
-
-@pytest.mark.parametrize("from_rest_m", [30.0, 60.0])
-def test_away_from_a_red_light_the_left_turn_is_taken_at_a_crawl_not_a_stop(
-    from_rest_m: float,
-) -> None:
-    """Bremen: away from a red light 30 m short of a left turn the truck sped
-    up to 19 km/h, braked for the crawl at the turn and stood in the middle
-    of the junction, nothing coming. Closed round the measured actuators, as
-    test_end_stop: the turn is reached at the crawl, the brake untouched."""
-    from core.control.acc import TURN_CREEP_MPS, TURN_SLOWING_FROM_M
-    from core.control.longitudinal import SpeedController
-
-    cruise = AdaptiveCruise(CAMERA)
-    turn = 1000.0
-    cruise.turns_across = [(turn, turn + 30.0)]
-    controller = SpeedController()
-    position, speed, acceleration, dt, lag = turn - from_rest_m, 0.0, 0.0, 1 / 60, 0.3
-    slowest, hardest = math.inf, 0.0
-    while position < turn:
-        cap = cruise._turn_cap(position)
-        assert cap is not None and turn - position <= TURN_SLOWING_FROM_M
-        command = controller.step(target_speed=min(cap, 13.9), speed=speed, grade=0.0, dt=dt)
-        hardest = max(hardest, command.brake)
-        delivered = controller.actuators.acceleration_for(command.throttle, command.brake)
-        acceleration += (delivered - acceleration) * dt / lag
-        speed = max(0.0, speed + acceleration * dt)
-        position += speed * dt
-        if speed > TURN_CREEP_MPS or slowest < math.inf:
-            slowest = min(slowest, speed)
-    assert slowest > 0.9 * TURN_CREEP_MPS, f"down to {slowest * 3.6:.1f} km/h before the turn"
-    assert hardest < 0.1, "a touch of the brake at most"
 
 
 TORINO_CUT_IN = (
@@ -1059,7 +1007,7 @@ def test_every_creep_is_enough_to_move_off_from_a_stop() -> None:
     from core.control import acc
     from core.control.parking import RESUME_TARGET_MPS
 
-    for name in ("CREEP_PAST_MPS", "RING_ENTRY_MPS", "TURN_CREEP_MPS"):
+    for name in ("CREEP_PAST_MPS", "RING_ENTRY_MPS"):
         assert getattr(acc, name) >= RESUME_TARGET_MPS, name
 
 
@@ -1261,7 +1209,7 @@ def test_short_of_a_tight_turn_the_truck_waits_while_a_vehicle_is_in_it() -> Non
 
     in_it = TrackReport(8, "truck", True, True, 25.0, -5.0, -3.0, 2.5)  # beside the line
     waiting = step(80.0, 8.0, 100.0, in_it)
-    assert waiting.decision.reason.startswith(TIGHT_WHY)
+    assert cruise._give_way is not None and cruise._give_way.why == TIGHT_WHY
     assert waiting.decision.target_speed < 8.0
     clear = AdaptiveCruise(CAMERA)
     clear.tight_turns = [(100.0, 120.0, turn)]
@@ -1300,10 +1248,9 @@ def test_a_turn_too_tight_for_the_trailer_is_found_along_the_path() -> None:
     assert len(points) >= 2
 
 
-def test_through_a_tight_turn_no_faster_than_8() -> None:
-    """Kept to its lane round a tight turn, the truck runs wider the faster it goes."""
-    from core.control.acc import TIGHT_THROUGH_MPS
-
+def test_through_a_tight_turn_no_slower_than_its_bend_takes() -> None:
+    """The driver's word (16 November): 8 km/h round tight turns, slowed to
+    from 1 km off, looked bad; the bend's own speed is the speed profile's."""
     cruise = AdaptiveCruise(CAMERA)
     cruise.tight_turns = [(300.0, 320.0, np.column_stack([np.zeros(20), 300.0 + np.arange(20.0)]))]
 
@@ -1311,10 +1258,8 @@ def test_through_a_tight_turn_no_faster_than_8() -> None:
         kwargs = dict(path=STRAIGHT, progress=progress, x=0.0, z=progress, course=0.0, speed=20.0)
         return cruise.step(report(grabbed_at=100.0), 100.05, **kwargs).decision.target_speed
 
-    assert target(0.0) is None or target(0.0) >= 20.0
-    assert target(200.0) < 20.0
-    for progress in (300.0, 310.0, 320.0):
-        assert target(progress) == pytest.approx(TIGHT_THROUGH_MPS)
+    for progress in (0.0, 200.0, 300.0, 310.0, 330.0):
+        assert target(progress) is None
 
 
 def lorry_from_its_corner(lateral_at, width: float = 12.0):
@@ -1398,3 +1343,120 @@ def test_a_lorry_moving_in_from_the_next_lane_afar_is_still_followed_close_by() 
         t += 0.3
     nearer = TrackReport(1, "truck", True, True, 21.0, -3.8, 0.86 + 1.6, 2.5)
     assert cruise.step(report(nearer, grabbed_at=t), t + 0.05, **kwargs).lead_id == 1
+
+
+def test_a_car_in_the_lane_on_the_open_road_is_never_let_go_as_oncoming() -> None:
+    """Duisburg, with another truck's camera: a car stopping at a red light
+    seemed to come at 17 km/h, was let go as oncoming, and was braked for at
+    8.8 m/s^2 from 30 m. In the lane on the open road it is followed as
+    standing at worst, and slowed for from afar."""
+    cruise = AdaptiveCruise(CAMERA)
+    speed = 8.6
+    step = cruise.step(
+        report(car(60.0, 0.86, closing=-(speed + 4.7))),
+        100.05,
+        path=STRAIGHT,
+        progress=0.0,
+        x=0.0,
+        z=0.0,
+        course=0.0,
+        speed=speed,
+    )
+    assert "oncoming" not in step.decision.reason
+    assert step.decision.target_speed is not None and step.decision.target_speed < speed
+    assert step.lead is not None and step.lead.closing_mps == pytest.approx(-speed)
+
+
+def test_through_a_junction_a_car_coming_the_other_way_is_still_not_followed() -> None:
+    cruise = AdaptiveCruise(CAMERA)
+    cruise.junctions = [(40.0, 80.0)]
+    speed = 8.6
+    step = cruise.step(
+        report(car(60.0, 0.86, closing=-(speed + 8.0))),
+        100.05,
+        path=STRAIGHT,
+        progress=0.0,
+        x=0.0,
+        z=0.0,
+        course=0.0,
+        speed=speed,
+    )
+    assert step.lead is None or step.lead.closing_mps < -speed
+
+
+def test_a_vehicle_seen_in_a_tight_turn_too_late_to_stop_short_of_it_is_not_waited_for() -> None:
+    """Sheffield: at 10 km/h, a car seen in the turn 1 m short of where to
+    wait, braked for at 7 m/s^2. Seen in good time, it is waited for."""
+    from core.control.acc import STOP_BEFORE_TURN_M, TIGHT_WHY
+
+    turn = np.column_stack([np.zeros(20), 100.0 + np.arange(20.0)])
+    in_it = TrackReport(8, "car", True, True, 13.0, -3.0, -3.0, 1.8)
+
+    def first_look(progress: float, speed: float):
+        cruise = AdaptiveCruise(CAMERA)
+        cruise.tight_turns = [(100.0, 120.0, turn)]
+        seen = dataclasses.replace(in_it, distance=100.0 - progress + 3.0)
+        kwargs = dict(path=STRAIGHT, progress=progress, x=0.0, z=progress, course=0.0, speed=speed)
+        return cruise.step(report(seen, grabbed_at=100.0), 100.05, **kwargs).decision
+
+    late = first_look(100.0 - STOP_BEFORE_TURN_M - 1.0, 3.0)
+    assert TIGHT_WHY not in late.reason
+    assert late.urgent_deceleration is None
+    early = first_look(70.0, 3.0)
+    assert early.reason.startswith(TIGHT_WHY)
+
+
+def test_a_lead_gone_round_a_bend_out_of_view_is_not_stopped_for() -> None:
+    """Leipzig: round a tight right turn a lorry ahead at 7 km/h went out of
+    view, was remembered standing 14 m on, and the truck stopped in the turn
+    for it twice. On the straight a lead lost close up still is."""
+    bend = np.vstack(
+        [
+            np.column_stack([np.zeros(20), np.arange(20.0)]),
+            np.column_stack([np.arange(1.0, 40.0), np.full(39, 19.0)]),
+        ]
+    )
+    bent = ReferencePath(bend, spacing=1.0)
+
+    def lost(path) -> str:
+        cruise = AdaptiveCruise(CAMERA)
+        kwargs = dict(path=path, progress=5.0, x=0.0, z=5.0, course=0.0, speed=2.0)
+        for k in range(40):
+            now = 100.0 + 0.05 * k
+            cruise.step(report(car(13.0, 0.9, closing=-1.0), grabbed_at=now), now + 0.01, **kwargs)
+        later = 102.0 + 0.5
+        return cruise.step(report(grabbed_at=later), later + 0.01, **kwargs).decision.reason
+
+    assert "out of view" in lost(STRAIGHT)
+    assert "out of view" not in lost(bent)
+
+
+def test_a_car_coming_fast_the_other_way_round_a_bend_is_not_stopped_for() -> None:
+    """Near Salzburg (18 November) a car in the oncoming lane came from 115 m
+    to 13 m in a second where a left-hand bend put the truck's lane; taken
+    for one standing in it, the truck braked at 8.6 m/s^2 to a stop."""
+    cruise = AdaptiveCruise(CAMERA)
+    kwargs = dict(path=STRAIGHT, progress=0.0, x=0.0, z=0.0, course=0.0, speed=5.6)
+    for k in range(10):
+        now = 100.0 + 0.05 * k
+        coming = car(18.0 - 0.9 * k, 0.9, closing=-5.6 - 14.0, track_id=131)
+        step = cruise.step(report(coming, grabbed_at=now), now + 0.01, **kwargs)
+        assert step.decision.urgent_deceleration is None, step.decision.reason
+        assert step.decision.target_speed is None or step.decision.target_speed >= 5.0
+    # Gone by out of view: not remembered standing there.
+    later = 100.6
+    gone = cruise.step(report(grabbed_at=later), later + 0.01, **kwargs)
+    assert "out of view" not in gone.decision.reason
+
+
+def test_a_car_seeming_to_come_slowly_in_the_lane_is_still_taken_to_stand() -> None:
+    """On another truck's camera cars standing at a red seemed to come at up
+    to 17 km/h (Duisburg): still stopped for, not let go as oncoming."""
+    cruise = AdaptiveCruise(CAMERA)
+    kwargs = dict(path=STRAIGHT, progress=0.0, x=0.0, z=0.0, course=0.0, speed=6.0)
+    for k in range(10):
+        now = 100.0 + 0.05 * k
+        step = cruise.step(
+            report(car(25.0, 0.9, closing=-6.0 - 4.7), grabbed_at=now), now + 0.01, **kwargs
+        )
+    assert step.decision.target_speed is not None and step.decision.target_speed < 6.0

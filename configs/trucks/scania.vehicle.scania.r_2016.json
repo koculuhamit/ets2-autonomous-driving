@@ -1,0 +1,13 @@
+{
+  "format": "ets2ad-truck-1",
+  "truck": "scania.vehicle.scania.r_2016",
+  "steering_map": null,
+  "brake_dead_zone": null,
+  "brake_curve": null,
+  "camera": null,
+  "cab_reference": "scania.vehicle.scania.r_2016.cab.npy",
+  "view": null,
+  "measured": {
+    "cab": "2026-11-15, the mean of 301 cab frames of data/missions/20261115-165444, at night: with the default dashboard (another truck's) the check fell back on darkness, which the Scania's lit dashboard failed, and five drives stopped with the camera in the cab"
+  }
+}

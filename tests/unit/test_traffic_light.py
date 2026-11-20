@@ -20,6 +20,7 @@ from core.control.traffic_light import (
     STOP_SHORT_M,
     STUCK_RED_S,
     UNSEEN_WAIT_S,
+    LightDecision,
     LightLine,
     TrafficLights,
     lines_on_path,
@@ -505,3 +506,220 @@ def test_after_a_dark_light_the_next_one_close_by_is_watched_at_once() -> None:
         if progress > 210.0 and progress < 268.0 - STOP_SHORT_M:
             decisions.append(decision)
     assert all(d.target_speed is None for d in decisions)
+
+
+def _see_camera():
+    from core.perception.camera import GroundCamera
+
+    return GroundCamera(focal_px=819.0, horizon_row=438.3, centre_col=960.1, height_m=2.881)
+
+
+def _row_of(height_m: float, from_eye_m: float, camera) -> float:
+    return camera.horizon_row - (height_m - camera.height_m) / from_eye_m * camera.focal_px
+
+
+def _view(top: float = 250.0, covered=()):
+    from core.control.traffic_light import ViewBounds
+
+    return ViewBounds(330.0, top, 1920.0, 700.0, covered=tuple(covered))
+
+
+def test_an_overhead_light_is_stopped_for_where_its_lamp_stays_in_view() -> None:
+    """Lamps 5.5 m up go behind the roof some 13 m from the line: stopped at
+    9.2 m, a DAF stood at a green it could not see."""
+    from core.control.traffic_light import STOP_SHORT_MAX_M, stop_short_to_see
+
+    camera, eye_ahead, top = _see_camera(), 1.81, 250.0
+    distance = 30.0
+    row = _row_of(5.5, distance - eye_ahead, camera)
+    stop = stop_short_to_see(distance, [(camera.centre_col, row)], camera, eye_ahead, _view(top))
+    rise_at_stop = (5.5 - camera.height_m) / (stop - eye_ahead) * camera.focal_px
+    assert camera.horizon_row - rise_at_stop > top or stop == STOP_SHORT_MAX_M
+    assert 12.0 < stop <= STOP_SHORT_MAX_M
+
+
+def test_a_light_on_a_pole_keeps_the_usual_stop() -> None:
+    from core.control.traffic_light import stop_short_to_see
+
+    camera = _see_camera()
+    row = _row_of(4.0, 20.0 - 1.81, camera)
+    assert stop_short_to_see(20.0, [(960.0, row)], camera, 1.81, _view()) == STOP_SHORT_M
+
+
+def test_the_lowest_lamp_decides_and_nothing_seen_changes_nothing() -> None:
+    """A lamp of the pole beside the line and one overhead: the pole's goes
+    out of view last."""
+    from core.control.traffic_light import stop_short_to_see
+
+    camera = _see_camera()
+    high, low = _row_of(5.5, 18.19, camera), _row_of(4.0, 18.19, camera)
+    lamps = [(960.0, high), (960.0, low)]
+    assert stop_short_to_see(20.0, lamps, camera, 1.81, _view()) == STOP_SHORT_M
+    assert stop_short_to_see(20.0, [], camera, 1.81, _view()) == STOP_SHORT_M
+    assert stop_short_to_see(20.0, [(960.0, 500.0)], camera, 1.81, _view()) == STOP_SHORT_M, (
+        "below the horizon"
+    )
+
+
+def test_a_further_stop_is_kept_to_by_the_light() -> None:
+    lights = TrafficLights([LightLine(100.0, LIGHT)])
+    near = lights.step(progress=86.0, speed=0.0, state=LightState.RED, minute_of_day=720.0)
+    far = TrafficLights([LightLine(100.0, LIGHT)]).step(
+        progress=86.0, speed=0.0, state=LightState.RED, minute_of_day=720.0, stop_short=14.0
+    )
+    assert (near.target_speed or 0.0) > 0.0, "14 m short of the line: 4 m to go at the usual stop"
+    assert far.target_speed == 0.0, "already at the light's own stop"
+
+
+def _approach(lights, seen: dict[float, LightState], until: float) -> LightDecision:
+    """Drive up to the line at 100 m in 1 m steps at 8 m/s, the light read as
+    `seen` gives by distance (UNKNOWN where not given)."""
+    decision = None
+    for progress in np.arange(0.0, until, 1.0):
+        distance = round(100.0 - progress)
+        decision = lights.step(
+            progress=float(progress),
+            speed=8.0,
+            state=seen.get(distance, LightState.UNKNOWN),
+            minute_of_day=720.0,
+            now=float(progress) / 8.0,
+        )
+    return decision
+
+
+def test_a_light_seen_green_only_from_afar_is_gone_through_slowly() -> None:
+    """Near Duisburg: green once at 105 m, never again, no light there."""
+    lights = TrafficLights([LightLine(100.0, LIGHT)])
+    near = _approach(lights, {75: LightState.GREEN}, 80.0)
+    assert near.target_speed is not None and near.target_speed > 0.0
+    assert "slowly through" in near.reason
+
+
+def test_a_light_seen_green_near_and_lost_is_still_stood_at() -> None:
+    lights = TrafficLights([LightLine(100.0, LIGHT)])
+    near = _approach(lights, {32: LightState.GREEN}, 92.0)
+    assert "slowly through" not in near.reason
+
+
+def test_a_light_seen_red_from_afar_and_lost_is_not_taken_for_dark() -> None:
+    lights = TrafficLights([LightLine(100.0, LIGHT)])
+    near = _approach(lights, {75: LightState.RED}, 80.0)
+    assert "slowly through" not in near.reason
+
+
+def test_creeping_on_from_the_stop_on_green_does_not_commit_short_of_the_line() -> None:
+    """Copenhagen: 8 m short of the line at 1 m/s on green, taken for on its
+    way through, held 10 s by crossing traffic, over the line on red."""
+    lights = TrafficLights([LightLine(100.0, LIGHT)])
+    kw = dict(minute_of_day=720.0)
+    lights.step(progress=91.0, speed=0.0, state=LightState.RED, now=0.0, **kw)
+    lights.step(progress=92.0, speed=1.05, state=LightState.GREEN, now=1.0, **kw)
+    red = lights.step(progress=92.0, speed=0.0, state=LightState.RED, now=5.0, **kw)
+    assert red.target_speed == 0.0, "8 m short of the line, the red is stopped for"
+
+
+def test_committed_on_green_then_held_short_of_the_line_the_light_counts_again() -> None:
+    from core.control.traffic_light import THROUGH_STANDING_S
+
+    lights = TrafficLights([LightLine(100.0, LIGHT)])
+    kw = dict(minute_of_day=720.0)
+    going = lights.step(progress=62.0, speed=13.9, state=LightState.GREEN, now=0.0, **kw)
+    assert "going through" in going.reason
+    # Held by something else 6 m short of the line, the light gone red.
+    lights.step(progress=94.0, speed=0.0, state=LightState.RED, now=10.0, **kw)
+    later = lights.step(
+        progress=94.0, speed=0.0, state=LightState.RED, now=10.0 + THROUGH_STANDING_S + 0.1, **kw
+    )
+    assert later.target_speed == 0.0
+    # Past the line it goes on whatever the light shows.
+    past = TrafficLights([LightLine(100.0, LIGHT)])
+    past.step(progress=62.0, speed=13.9, state=LightState.GREEN, now=0.0, **kw)
+    over = past.step(progress=98.5, speed=0.0, state=LightState.RED, now=20.0, **kw)
+    assert "going through" in over.reason
+
+
+def test_a_line_close_after_a_green_with_no_lamp_in_view_is_not_stopped_at() -> None:
+    """Leipzig (16 November): 33 m after a green, a line the map has and the
+    road does not; no lamp in view the whole way, only the filter still
+    holding the green. Stopped at, the truck waited 10 s for nothing."""
+    second = LINE_AT + 33.0
+    lights = TrafficLights([LightLine(LINE_AT, LIGHT), LightLine(second, LIGHT)])
+    speed, dt = 7.0, 1 / 30
+    position, t, slowest = LINE_AT - 60.0, 0.0, math.inf
+    while position < second + 5.0:
+        held = position < LINE_AT + 3.0
+        decision = lights.step(
+            progress=position,
+            speed=speed,
+            state=GREEN if held else UNKNOWN,
+            lamp=GREEN if position < LINE_AT else UNKNOWN,
+            minute_of_day=720.0,
+            now=t,
+        )
+        if position > LINE_AT and decision.target_speed is not None:
+            slowest = min(slowest, decision.target_speed)
+        position += speed * dt
+        t += dt
+    assert slowest == math.inf, "not slowed for"
+
+
+def test_a_lamp_going_out_of_view_is_stopped_for_where_it_was_seen_going() -> None:
+    """Leipzig (16 November): a Volvo on the Actros's camera, told its near
+    lamp would stay in view to 10 m, lost it at 14.5 and stood 16 s at a
+    green it could not see. Measured from the lamp's own way across the view
+    -- the camera another truck's, the pole 3 m short of the line -- the
+    truck stops where the lamp is still in view."""
+    from core.control.traffic_light import STOP_SHORT_MAX_M, stop_short_from_sightings
+
+    view = _view(178.0, [(1655.0, 80.0, 1920.0, 405.0)])
+    focal, horizon, centre, height = 900.0, 400.0, 955.0, 2.6  # the truck's own
+    eye_ahead, setback, up, right = 1.8, 3.0, 5.0, 4.5
+
+    def lamp(to_line: float) -> tuple[float, float]:
+        z = to_line - setback - eye_ahead
+        return centre + focal * right / z, horizon - focal * (up - height) / z
+
+    sightings = [(d, *lamp(d)) for d in np.arange(40.0, 24.0, -0.5)]
+    # Taken about the Actros's middle of the view, not the truck's own.
+    stop = stop_short_from_sightings(sightings, (960.0, 438.0), view)
+    assert stop is not None
+    assert stop > STOP_SHORT_M
+    assert view.shows(*lamp(stop)) or stop == STOP_SHORT_MAX_M
+    lost = max(d for d in np.arange(10.0, 40.0, 0.25) if not view.shows(*lamp(d)))
+    assert stop <= lost + 3.0, "not much further back than needed"
+
+
+def test_a_lamp_seen_too_little_is_not_measured() -> None:
+    from core.control.traffic_light import stop_short_from_sightings
+
+    few = [(30.0, 1200.0, 300.0), (29.5, 1205.0, 298.0)]
+    assert stop_short_from_sightings(few, (960.0, 438.0), _view()) is None
+
+
+def test_short_of_a_red_the_truck_is_not_sped_up_towards_it() -> None:
+    """A red seen 65 m off at 34 km/h: the truck sped up to 38 towards it,
+    and braked the harder for it later (18 November)."""
+    lights = TrafficLights([LightLine(LINE_AT, LIGHT)])
+    decision = lights.step(
+        progress=LINE_AT - 65.0, speed=9.3, state=RED, minute_of_day=720.0, now=0.0
+    )
+    assert decision.target_speed is not None and decision.target_speed <= 9.3 + 1e-6
+    # From slower, a crawl up to the line still.
+    slow = TrafficLights([LightLine(LINE_AT, LIGHT)])
+    crawl = slow.step(progress=LINE_AT - 40.0, speed=0.5, state=RED, minute_of_day=720.0, now=0.0)
+    assert crawl.target_speed > 0.5
+
+
+def test_a_light_s_stop_is_moved_back_only_as_far_as_is_stopped_short_of_gently() -> None:
+    """Moved 10 m back 32 m short of the line at 38 km/h, a red was braked
+    for at 4 to 5.4 m/s^2, three times on one drive (18 November)."""
+    from tools.follow import LIGHT_STOP_MOVE_DECELERATION, moved_stop
+
+    speed = 38 / 3.6
+    assert moved_stop(10.0, 20.0, 32.0, speed) == 10.0, "too late to move it back at all"
+    stop = moved_stop(10.0, 20.0, 55.0, speed)
+    assert 10.0 < stop < 20.0, "back as far as is gentle"
+    assert speed**2 / (2.0 * (55.0 - stop)) == pytest.approx(LIGHT_STOP_MOVE_DECELERATION)
+    assert moved_stop(10.0, 20.0, 70.0, speed) == 20.0, "in good time: all the way"
+    assert moved_stop(16.0, 12.0, 20.0, speed) == 12.0, "towards the line: at once"
+    assert moved_stop(15.0, 20.0, 18.0, speed) == 15.0, "never nearer than it was"

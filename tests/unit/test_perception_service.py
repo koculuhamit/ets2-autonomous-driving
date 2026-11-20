@@ -102,6 +102,12 @@ def test_a_snapshot_asked_for_while_nothing_reads_the_reports_is_still_written(t
         wait_for(service, lambda r: True)
         time.sleep(3.0)  # nothing read: the pipe fills
         service.snapshot("hit-0001.0")
+        # Written by the child in its own time: stopped at once, a loaded
+        # runner stopped it first now and then. A child blocked on the pipe
+        # never writes, and this still fails.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not any((tmp_path / "hit-0001.0").glob("*.jpg")):
+            time.sleep(0.1)
     finally:
         service.stop()
     assert any((tmp_path / "hit-0001.0").glob("*.jpg"))

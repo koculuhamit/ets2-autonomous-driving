@@ -164,3 +164,48 @@ def test_a_view_is_set_from_boxes_in_fractions_and_round_trips() -> None:
         parse_box("0.5,0.5,0.4,0.6")
     with pytest.raises(ValueError):
         view_from("0,0,1,1", ["0,0,2,1"])
+
+
+def test_a_truck_without_its_own_dashboard_learns_one(tmp_path) -> None:
+    from core.calibration import DEFAULTS_TRUCK
+
+    scania = TruckProfile("scania.vehicle.scania.r_2016")
+    assert scania.learns_cab(tmp_path) == tmp_path / "scania.vehicle.scania.r_2016.cab.npy"
+    learned = scania.with_cab(tmp_path / "scania.vehicle.scania.r_2016.cab.npy")
+    assert learned.cab_reference == "scania.vehicle.scania.r_2016.cab.npy"
+    assert "learned" in learned.measured["cab"] and "cab" not in learned.missing()
+    assert learned.learns_cab(tmp_path) is None, "learned once"
+    assert TruckProfile(DEFAULTS_TRUCK).learns_cab(tmp_path) is None, "the default is its own"
+    assert TruckProfile(DEFAULTS_TRUCK).missing() == []
+
+
+def test_the_driver_is_told_what_a_truck_is_not_calibrated_for() -> None:
+    from core.calibration import DEFAULTS_TRUCK
+    from tools.follow import uncalibrated
+
+    said = uncalibrated(TruckProfile("scania.vehicle.scania.r_2016"))
+    assert "not calibrated" in said and "distances" in said and "cab view (1)" in said
+    assert uncalibrated(TruckProfile(DEFAULTS_TRUCK)) == ""
+
+
+def test_a_truck_without_a_view_of_its_own_learns_its_windscreen() -> None:
+    from core.calibration import DEFAULTS_TRUCK
+
+    xd = TruckProfile("daf.vehicle.daf.xd")
+    assert xd.learns_roof()
+    learned = xd.with_view_top(170 / 1080)
+    assert learned.cab_view().windscreen.top == pytest.approx(170 / 1080, abs=1e-4)
+    assert learned.cab_view().covered == xd.cab_view().covered
+    assert not learned.learns_roof(), "learned once"
+    assert "view" not in learned.missing()
+    assert not TruckProfile(DEFAULTS_TRUCK).learns_roof()
+
+
+def test_a_truck_without_its_own_camera_is_to_have_it_learned() -> None:
+    from core.calibration import DEFAULTS_TRUCK
+
+    xf = TruckProfile("daf.vehicle.daf.xf_electric")
+    assert xf.learns_camera()
+    learned = xf.with_camera("daf.vehicle.daf.xf_electric.camera.json", "learned")
+    assert not learned.learns_camera() and "learned" in learned.measured["camera"]
+    assert not TruckProfile(DEFAULTS_TRUCK).learns_camera()

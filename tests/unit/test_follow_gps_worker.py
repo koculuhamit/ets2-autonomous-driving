@@ -495,3 +495,34 @@ def test_the_driver_is_told_to_fill_up_once_the_tank_is_low_and_again_as_it_runs
     told = FUEL_TELL_BELOW_KM - 1.0
     assert not fuel_to_tell(told - FUEL_TELL_EVERY_KM + 1.0, told), "not at every look"
     assert fuel_to_tell(told - FUEL_TELL_EVERY_KM, told)
+
+
+def test_an_electric_truck_braking_with_its_motor_takes_the_pedal() -> None:
+    """DAF XF Electric: brake read 0.25, applied 0.03; not 'nothing applied'."""
+    from tools.follow import pedals_taken
+
+    truck = {
+        "effective_throttle": 0.0,
+        "effective_brake": 0.03,
+        "input_throttle": 0.0,
+        "input_brake": 0.25,
+    }
+    assert pedals_taken(truck) == 0.25
+    unfocused = dict.fromkeys(truck, 0.0)
+    assert pedals_taken(unfocused) == 0.0, "a game that reads nothing still says so"
+
+
+def test_no_speed_is_gathered_while_the_wheel_is_turned_for_a_corner() -> None:
+    """Berlin: wheel near lock, planned speed up to 47 km/h, a lamp post at 20."""
+    import math
+
+    from core.control.lateral import ACTROS_GEOMETRY
+    from tools.follow import TURNING_LATERAL_MPS2, turning_cap
+
+    corner = turning_cap(ACTROS_GEOMETRY, -0.55)
+    angle = ACTROS_GEOMETRY.angle_for_command(0.55)
+    radius = ACTROS_GEOMETRY.wheelbase / math.tan(angle)
+    assert corner == pytest.approx(math.sqrt(TURNING_LATERAL_MPS2 * radius))
+    assert corner * 3.6 < 20.0
+    assert turning_cap(ACTROS_GEOMETRY, 0.01) is None, "a motorway's bend"
+    assert turning_cap(ACTROS_GEOMETRY, 0.0) is None

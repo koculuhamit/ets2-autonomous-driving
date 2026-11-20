@@ -40,6 +40,10 @@ DEFAULT_CAB_FILE: Final = PROFILES_DIR.parent / "cab_dashboard.npy"
 
 FORMAT: Final = "ets2ad-truck-1"
 
+DEFAULTS_TRUCK: Final = "mercedes.vehicle.mercedes.actros2014"
+"""The truck the default camera and dashboard were measured on: the
+Actros. Another without its own drives on them (`TruckProfile.missing`)."""
+
 NO_BRAKING_MPS2: Final = 0.2
 """Deceleration under which a brake command counts as doing nothing: 0.05
 of command gave 0.02 m/s^2 on the Actros, coasting all but."""
@@ -127,8 +131,74 @@ class TruckProfile:
             covered=tuple(Rect(*r) for r in self.view.get("covered", ())),
         )
 
+    def learns_cab(self, directory: Path = PROFILES_DIR) -> Path | None:
+        """Where this truck's dashboard is to be saved once learned from a
+        drive (core.perception.cab.DashboardLearner): for a truck with none
+        of its own and not the one the default was recorded on; else None."""
+        if self.cab_reference or self.truck in (DEFAULTS_TRUCK, "unknown.unknown"):
+            return None
+        return directory / f"{self.truck}.cab.npy"
+
+    def with_cab(self, learned: Path, directory: Path = PROFILES_DIR) -> TruckProfile:
+        """This profile with its dashboard learned and saved at `learned`."""
+        from datetime import date
+
+        return replace(
+            self,
+            cab_reference=learned.name,
+            measured={
+                **self.measured,
+                "cab": f"{date.today().isoformat()}, learned from the first frames of a drive",
+            },
+        )
+
+    def learns_camera(self) -> bool:
+        """Whether this truck's camera is still to be measured, before it is
+        driven: with another truck's, distances, places across and widths
+        all come out wrong, and a DAF XD ran into the lorry ahead."""
+        return not self.camera and self.truck not in (DEFAULTS_TRUCK, "unknown.unknown")
+
+    def with_camera(self, name: str, note: str) -> TruckProfile:
+        """This profile with its camera measured, in `name` beside it."""
+        from datetime import date
+
+        return replace(
+            self,
+            camera=name,
+            measured={**self.measured, "camera": f"{date.today().isoformat()}, {note}"},
+        )
+
+    def learns_roof(self) -> bool:
+        """Whether this truck's windscreen is to be found from a drive: one
+        with no view of its own, not the one the default was measured on."""
+        return not self.view and self.truck not in (DEFAULTS_TRUCK, "unknown.unknown")
+
+    def with_view_top(self, top: float) -> TruckProfile:
+        """This profile with the default view, its windscreen begun at `top`
+        (a share of the frame's height), as learned from a drive."""
+        from datetime import date
+
+        view = self.cab_view()
+
+        def box(rect) -> list[float]:
+            return [rect.left, rect.top, rect.right, rect.bottom]
+
+        windscreen = box(view.windscreen)
+        windscreen[1] = round(float(top), 4)
+        return replace(
+            self,
+            view={"windscreen": windscreen, "covered": [box(r) for r in view.covered]},
+            measured={
+                **self.measured,
+                "view": f"{date.today().isoformat()}, windscreen's top learned from a drive",
+            },
+        )
+
     def missing(self) -> list[str]:
-        """What this truck still runs on the Actros's numbers for."""
+        """What this truck still runs on the Actros's numbers for: nothing,
+        for the Actros."""
+        if self.truck == DEFAULTS_TRUCK:
+            return []
         names = {
             "steering": self.steering_map,
             "brake": self.brake_curve,

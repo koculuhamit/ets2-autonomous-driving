@@ -37,10 +37,12 @@ from dataclasses import dataclass
 from typing import Final
 
 from core.bridge import convert
+from core.control.retarder import PER_STEP_GUESS, RETARDER_FROM_MPS
 
 __all__ = [
     "ACTROS_EMPTY",
     "ActuatorMap",
+    "BrakeEstimate",
     "LongitudinalCalibration",
     "LongitudinalCommand",
     "SpeedController",
@@ -186,6 +188,8 @@ class LongitudinalCommand:
     throttle: float
     brake: float
     reason: str
+    retarder: int = 0
+    """The retarder's step wanted (core.control.retarder); 0 is off."""
 
     @property
     def is_braking(self) -> bool:
@@ -223,8 +227,21 @@ class ActuatorMap:
         self._brake_engage = brake_engage
         self._brake_release = brake_release
         self._braking = False
+        self._retarding = 0
+        self._retarder_held_s = 0.0
         self.mass_ratio = 1.0
         """Mass against the calibration's (`mass_ratio`); requests are scaled by it."""
+        self.retarder_steps = 0
+        """The truck's retarder steps (`retarder_step_count`); 0: none."""
+        self.retarder_per_step = PER_STEP_GUESS
+        """What a step slows the calibrated truck by, m/s^2 (`RetarderEstimate`)."""
+        self.brake_ratio: float | None = None
+        """The brake's own: how much more the calibrated truck's brake must
+        be asked for than it gives this one (`BrakeEstimate`); None: the
+        mass's (`mass_ratio`)."""
+        self.speed: float | None = None
+        """The truck's speed, m/s, if known: the retarder is left off below
+        `RETARDER_FROM_MPS`."""
 
     @property
     def calibration(self) -> LongitudinalCalibration:
@@ -238,6 +255,36 @@ class ActuatorMap:
     def reset(self) -> None:
         """Forget the latched state. Call on engage, not between steps."""
         self._braking = False
+        self._retarding = 0
+        self._retarder_held_s = 0.0
+
+    def _retarder_reach(self) -> float:
+        """How much more than coasting the retarder can slow the calibrated
+        truck by now, m/s^2: 0 without one, or too slow for it."""
+        if self.retarder_steps <= 0 or (self.speed is not None and self.speed < RETARDER_FROM_MPS):
+            return 0.0
+        return self.retarder_steps * self.retarder_per_step
+
+    def tick(self, dt: float) -> None:
+        """Time goes by: `dt` seconds since the last command."""
+        self._retarder_held_s += max(dt, 0.0)
+
+    def _set_retarder(self, step: int) -> int:
+        """To `step`, but not down within `RETARDER_HOLD_S` of the last
+        change: each change is a press of the lever."""
+        if step < self._retarding and self._retarder_held_s < RETARDER_HOLD_S:
+            return self._retarding
+        if step != self._retarding:
+            self._retarding, self._retarder_held_s = step, 0.0
+        return self._retarding
+
+    def _retarder_step(self, beyond_coasting: float) -> int:
+        """The step that gives `beyond_coasting` m/s^2, held unless another
+        is a good deal nearer."""
+        exact = beyond_coasting / self.retarder_per_step
+        if abs(exact - self._retarding) > RETARDER_STEP_HYSTERESIS:
+            return self._set_retarder(max(0, min(round(exact), self.retarder_steps)))
+        return self._retarding
 
     def command_for(self, acceleration: float) -> LongitudinalCommand:
         """Pedal commands for a desired acceleration in m/s^2.
@@ -253,19 +300,46 @@ class ActuatorMap:
 
         if acceleration >= 0.0:
             self._braking = False
+            if acceleration < RETARDER_OVER_THROTTLE and self._set_retarder(0) > 0:
+                # A step just taken is held, and not pulled against: on the
+                # way to Eindhoven the lever went 1, 0, 1, 0 every 0.2 s, the
+                # throttle full between (18 November).
+                return LongitudinalCommand(
+                    0.0, 0.0, "retarder held: coasting", retarder=self._retarding
+                )
+            self._retarding, self._retarder_held_s = 0, 0.0
             throttle = _invert(self._calibration.throttle_curve, acceleration)
             return LongitudinalCommand(throttle, 0.0, "accelerating")
 
         wanted = -acceleration
-        if wanted <= self._calibration.coast_deceleration:
+        coast = self._calibration.coast_deceleration
+        if wanted <= coast:
             self._braking = False
-            return LongitudinalCommand(0.0, 0.0, "coasting is enough")
+            step = self._set_retarder(0)
+            reason = "retarder held" if step > 0 else "coasting is enough"
+            return LongitudinalCommand(0.0, 0.0, reason, retarder=step)
 
         # In the gap. Latch, so the choice is held rather than remade on every
         # frame: each switch is a 1.6 m/s^2 step and the passengers feel it.
-        threshold = self._brake_release if self._braking else self._brake_engage
+        # A retarder fills the gap as far as it reaches, and the brake is
+        # only for past that.
+        reach = self._retarder_reach()
+        engage = max(self._brake_engage, min(coast + reach, self._calibration.minimum_braking))
+        release = engage - (self._brake_engage - self._brake_release)
+        threshold = release if self._braking else engage
         if wanted < threshold:
             self._braking = False
+            if reach > 0.0:
+                step = self._retarder_step(wanted - coast)
+                if step > 0:
+                    return LongitudinalCommand(
+                        0.0,
+                        0.0,
+                        f"retarder {step} of {self.retarder_steps}: {wanted:.2f} m/s2 wanted",
+                        retarder=step,
+                    )
+            else:
+                self._retarding = 0
             return LongitudinalCommand(
                 0.0,
                 0.0,
@@ -274,23 +348,122 @@ class ActuatorMap:
             )
 
         self._braking = True
+        # The retarder stays where it is, and the brake gives the rest: let
+        # off at each touch of the brake, it was worked to and fro.
+        step = self._retarding if self._retarder_reach() > 0.0 else 0
+        wanted = max(wanted - step * self.retarder_per_step, 0.0)
+        ratio = self.brake_ratio if self.brake_ratio is not None else brake_prior(self.mass_ratio)
+        if self.mass_ratio > 0.0:
+            # The brake as this truck has been seen to brake, or a guess
+            # short of the load's: not as the load is taken to make it.
+            wanted = wanted / self.mass_ratio * ratio
         brake = _invert(self._calibration.brake_curve, wanted)
         brake = max(brake, self._calibration.brake_curve[0][0])
-        return LongitudinalCommand(0.0, min(brake, 1.0), "braking")
+        return LongitudinalCommand(0.0, min(brake, 1.0), "braking", retarder=step)
 
-    def acceleration_for(self, throttle: float, brake: float) -> float:
-        """What the vehicle will actually do, given pedal commands.
+    def acceleration_for(self, throttle: float, brake: float, retarder: int = 0) -> float:
+        """What the vehicle will actually do, given pedal commands and the
+        retarder's step.
 
         The forward direction of the same maps, used by the simulated plant in
         the tests and by anything that wants to predict rather than command.
         """
         if brake > self._calibration.brake_dead_zone:
             calibrated = -_interpolate(self._calibration.brake_curve, brake)
+            retarding = retarder * self.retarder_per_step / self.mass_ratio
+            return calibrated / (self.brake_ratio or self.mass_ratio) - retarding
         elif throttle > 0.0:
             calibrated = _interpolate(self._calibration.throttle_curve, throttle)
         else:
-            calibrated = -self._calibration.coast_deceleration
+            calibrated = -self._calibration.coast_deceleration - retarder * self.retarder_per_step
         return calibrated / self.mass_ratio
+
+
+@dataclass
+class BrakeEstimate:
+    """How much harder the calibrated truck's brake must be asked for than
+    it gives this one, learned from what the truck does braking: the load
+    guessed from the cargo alone (`mass_ratio`) was 1.42 on a Scania R near
+    Eindhoven, and its brake gave 25 to 40 % more than that allowed for --
+    2.5 m/s^2 asked for, 3.5 to 4.9 given (18 November)."""
+
+    ratio: float | None = None
+    seen_s: float = 0.0
+    _brake: float = 0.0
+    _steady_s: float = 0.0
+
+    def observe(
+        self,
+        *,
+        brake: float,
+        throttle: float,
+        acceleration: float,
+        grade: float,
+        speed: float,
+        calibration: LongitudinalCalibration,
+        dt: float,
+    ) -> None:
+        """One frame of telemetry: the brake and throttle the game applied,
+        the acceleration along the way and the grade (positive downhill)."""
+        if abs(brake - self._brake) > BRAKE_STEADY_BAND:
+            self._brake, self._steady_s = brake, 0.0
+            return
+        self._steady_s += dt
+        if (
+            brake <= calibration.brake_dead_zone
+            or throttle > THROTTLE_OFF
+            or speed < BRAKE_LEARN_FROM_MPS
+            or self._steady_s < BRAKE_STEADY_S
+            or dt <= 0.0
+        ):
+            return
+        slowing = grade - acceleration
+        if slowing <= 0.1:
+            return
+        seen = _interpolate(calibration.brake_curve, brake) / slowing
+        if not BRAKE_LEAST_RATIO <= seen <= BRAKE_MOST_RATIO:
+            return
+        if self.ratio is None:
+            self.ratio = seen
+        else:
+            self.ratio += min(dt / BRAKE_LEARN_TIME_S, 1.0) * (seen - self.ratio)
+        self.seen_s += dt
+
+
+THROTTLE_OFF: Final = 0.02
+"""The game's throttle, let go, reads a little over nothing: 1e-9 to 0.004."""
+
+BRAKE_STEADY_BAND: Final = 0.01
+BRAKE_STEADY_S: Final = 0.3
+"""A brake held within this of one command this long is judged: the game
+takes a moment to bring the brake on."""
+BRAKE_LEARN_FROM_MPS: Final = 3.0
+BRAKE_LEARN_TIME_S: Final = 3.0
+BRAKE_LEAST_RATIO: Final = 0.4
+BRAKE_MOST_RATIO: Final = 4.0
+
+
+def brake_prior(mass: float) -> float:
+    """What the brake is taken to need, against the calibrated truck, until
+    seen (`BrakeEstimate`): half the load's guess beyond one. Seen, it was
+    1.05 for a guessed 1.42 (a Scania R, 6.3 t), 1.81 for 3.14, 2.08 for
+    1.83 (12.4 t of garlic): taken at the load's, the first brake of a drive
+    was 4.3 m/s^2 for 2.5 asked for. Short of it, the speed controller and a
+    stop's own working out ask for more."""
+    return 1.0 + 0.5 * max(mass - 1.0, 0.0)
+
+
+RETARDER_HOLD_S: Final = 1.5
+"""A retarder step is held this long before the lever goes back down."""
+
+RETARDER_OVER_THROTTLE: Final = 0.5
+"""Asked to speed up by less than this, m/s^2 for the calibrated truck,
+with a step just taken, the truck coasts with it on instead."""
+
+RETARDER_STEP_HYSTERESIS: Final = 0.75
+"""How much nearer, in steps, another retarder step must be to be moved to:
+a request wandering about half-way between two steps is not to work the
+lever back and forth."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,6 +646,8 @@ class SpeedController:
         """
         if dt <= 0.0:
             raise ValueError("dt must be positive")
+        self._actuators.speed = speed
+        self._actuators.tick(dt)
 
         if target_speed <= STOP_TARGET and speed < HOLD_BELOW:
             self._integral = 0.0
@@ -520,6 +695,7 @@ class SpeedController:
         out of it at `MAX_JERK`."""
         if dt <= 0.0:
             raise ValueError("dt must be positive")
+        self._actuators.tick(dt)
         self._integral = 0.0
         self._felt = max(-deceleration, min(self._felt, 0.0) - URGENT_JERK * dt)
         self.last_request = self._felt

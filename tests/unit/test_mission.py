@@ -217,3 +217,27 @@ def test_a_job_s_place_far_from_where_the_game_s_gps_goes_is_not_driven_to() -> 
     assert not gps_elsewhere(997_300.0, 1_008_200.0), "the job's: 11 km over 1000"
     assert not gps_elsewhere(12_000.0, 31_000.0), "within 30 km on a short way"
     assert gps_elsewhere(20_000.0, 60_000.0)
+
+
+def test_stopped_on_the_depot_s_own_road_the_driver_drives_on_to_the_gate() -> None:
+    from core.mission import how_it_ended
+
+    how, detail = how_it_ended("service_road", "", 3_196.0, 40_000.0)
+    assert how is DriveEnd.AT_DEPOT, "not 'ended short of the depot': it stopped there on purpose"
+    mission = Mission()
+    mission.observe(seen())
+    mission.observe(seen(beacon=True))
+    mission.drive_ended(how, (0.0, 0.0), detail)
+    assert mission.state is State.ARRIVED
+    assert "own road" in mission.message and "drive on to the gate" in mission.message
+
+
+def test_a_truck_whose_camera_is_being_learned_is_not_driven() -> None:
+    mission = Mission()
+    mission.observe(seen())
+    assert mission.observe(seen(beacon=True))
+    mission.cannot_drive("camera still being learned: more bends")
+    assert mission.state is State.READY and "camera" in mission.message
+    assert not mission.observe(seen(beacon=True)), "the beacon left on does nothing"
+    mission.observe(seen(beacon=False))
+    assert mission.observe(seen(beacon=True)), "off and on again: asked again"

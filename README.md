@@ -28,6 +28,9 @@ switch the truck's beacon on (O). The truck then drives the delivery.
   and away, one give-way decision per junction, and jerk-limited pedals.
 - It stops for red lights, including one it loses sight of behind a lorry,
   and moves off with the queue.
+- It slows on the retarder before the brake where the truck has one, and
+  learns how hard each truck brakes.
+- With `--ros`, what it sees and plans is shown in RViz (ROS 2 Humble).
 - At a port, a train terminal or the depot's gate it stops with its hazard
   lights on and sounds the horn twice. The driver takes the crossing, or
   parks and delivers.
@@ -38,9 +41,15 @@ over. Nothing is drawn over the game, and the game's UI is never automated.
 
 ## Status
 
-Release 2.0.0. On Windows 11 three deliveries in a row were driven without a
-hit or a take-over: Bergen to Calais, Milan to Verona, Munich to Nuremberg.
-On Ubuntu 22.04 and on Windows the release was installed from its zip into
+Release 2.1.0, driven on Ubuntu 22.04: three deliveries in a row went
+through without a fault to fix, to Düsseldorf, Salzburg and Linz. Since
+2.0.0 it has driven 1712 km of the game's in 28 drives; what changed is in
+the [release notes](docs/release-notes-2.1.0.md). Its Windows build is made
+and checked by CI but has not been driven yet.
+
+Release 2.0.0 was driven on Windows 11 until three deliveries in a row went
+without a hit or a take-over: Bergen to Calais, Milan to Verona, Munich to
+Nuremberg. On Ubuntu 22.04 and on Windows it was installed from its zip into
 an empty folder, the way a new user would, and driven.
 
 Earlier, on Linux, every mission recorded up to 4 October 2026 (33 drives,
@@ -86,6 +95,7 @@ Run the game full screen at 1920x1080, with the interior camera.
 | `tools/panel.py` | a status panel in a terminal beside the game |
 | `tools/calibrate.py` | measure a new truck: steering, brakes, camera, dashboard |
 | `tools/report.py` | measure recorded drives: lateral error, braking, hits, interventions / 100 km |
+| `tools/ros_replay.py` | play a recorded drive into the ROS 2 view |
 | `tools/teach_crossing.py` | teach a junction or passage the map gets wrong, by driving it |
 
 ## Development setup
@@ -125,7 +135,7 @@ default: `pytest -m "not game and not hardware"`.
 ```
 core/       platform-independent: perception, localization, planning, control
 pal/        platform abstraction layer: base + linux + windows + fake
-adapters/   placeholders for external interfaces (ros2, rest): none built yet
+adapters/   external interfaces: ros2 (a bridge to RViz); rest is a placeholder
 tools/      calibration, data collection, analysis, map extraction
 plugin/     SCS SDK telemetry plugin source (CMake, Linux + Windows)
 tests/      unit, PAL contract, offline replay
@@ -144,9 +154,10 @@ between C++ and Python on two platforms. The layout header is written with
 explicit padding and static assertions so that both compilers should agree,
 and that CI job checks that they do.
 
-There is no ROS 2 interface yet. If one is added it will be an adapter in
-`adapters/ros2/`, and `core/` will still not import `rclpy`: a test checks
-that it does not.
+The ROS 2 interface is an adapter in `adapters/ros2/`: the drive sends what
+it sees and plans over a local socket, and a ROS 2 node (built with colcon
+against Humble) publishes it for RViz. `core/` does not import `rclpy`, and
+a test checks that it does not; the drive runs the same without ROS.
 
 ## Platform support
 

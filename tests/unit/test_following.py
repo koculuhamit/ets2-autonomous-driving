@@ -242,7 +242,70 @@ def test_giving_way_the_truck_does_not_speed_up_towards_where_it_stops() -> None
         room -= speed * dt
         top = max(top, speed)
     assert top <= 12 / 3.6 + 0.1
-    assert room > 0.0, "stopped short"
+    # At the place, give or take the last centimetres: braked for directly
+    # on the planned curve, the brake's least is a little more than it.
+    assert room > -0.5, "stopped at the place"
     assert hardest <= COMFORT_DECELERATION + 1.0
     # From a crawl far off, it still comes on.
     assert stop_short(40.0, 0.0, "giving way").target_speed == APPROACH_CREEP_MPS
+
+
+def test_a_lead_closing_faster_than_the_truck_goes_is_braked_for_no_more_than_stopping() -> None:
+    """Hamburg: a low loader turning across seemed to close at 6.8 m/s on a
+    truck doing 2.5 m/s 12 m off, and was braked for at 7 m/s^2; stopping
+    took 0.4."""
+    from core.control.following import COMFORT_DECELERATION, Lead, follow
+
+    decision = follow(Lead(12.2, -6.8), 2.5)
+    assert decision.urgent_deceleration is None or decision.urgent_deceleration <= (
+        COMFORT_DECELERATION
+    )
+    # A stopped car near ahead at speed is still braked for hard.
+    assert follow(Lead(14.0, -13.9), 13.9).urgent_deceleration is not None
+
+
+def _stop(room: float, speed: float, slack: float = 0.0) -> tuple[float, float]:
+    """`stop_short` closed round the measured actuators, as the loop drives
+    it: the hardest deceleration asked for, and the metres left at the stop."""
+    from core.control.following import stop_short
+
+    controller = SpeedController()
+    dt, hardest = 1 / 60, 0.0
+    while speed > 0.05 and room > -slack - 5.0:
+        decision = stop_short(room, speed, "giving way", slack)
+        if decision.urgent_deceleration is not None:
+            hardest = max(hardest, decision.urgent_deceleration)
+            command = controller.urgent(decision.urgent_deceleration, dt)
+        else:
+            command = controller.step(
+                target_speed=decision.target_speed, speed=speed, grade=0.0, dt=dt
+            )
+        speed = max(
+            0.0, speed + controller.actuators.acceleration_for(command.throttle, command.brake) * dt
+        )
+        room -= speed * dt
+    return hardest, room
+
+
+def test_a_stop_in_good_time_is_braked_for_gently_not_left_to_the_last_metres() -> None:
+    """Leipzig (16 November): giving way at 25 km/h from 21 m, the truck
+    coasted on at 25 until 0 to 2 m short, then braked at 7 m/s^2."""
+    from core.control.following import COMFORT_DECELERATION
+
+    for room, kmh in ((21.0, 25.0), (40.0, 30.0), (10.0, 14.0)):
+        hardest, left = _stop(room, kmh / 3.6)
+        assert hardest <= COMFORT_DECELERATION, (room, kmh, hardest)
+        assert left > -0.5, (room, kmh, left)
+
+
+def test_a_stop_come_on_late_uses_the_room_beyond_it() -> None:
+    """A vehicle crossing first seen 12 m ahead at 16 km/h: stopped short of
+    it by the least gap, gently, not short of the standstill gap at 7 m/s^2."""
+    from core.control.following import COMFORT_DECELERATION, MAX_DECELERATION, stop_short
+
+    assert stop_short(0.0, 16 / 3.6, "crossing").urgent_deceleration == MAX_DECELERATION
+    late = stop_short(0.0, 16 / 3.6, "crossing", slack=6.0).urgent_deceleration
+    assert late is not None and late <= COMFORT_DECELERATION
+    hardest, left = _stop(0.5, 16 / 3.6, slack=6.0)
+    assert hardest <= COMFORT_DECELERATION
+    assert left > -6.0, "short of the vehicle"

@@ -376,7 +376,9 @@ def test_a_loaded_truck_is_braked_harder_for_the_same_deceleration() -> None:
     empty, heavy = ActuatorMap(), ActuatorMap()
     heavy.mass_ratio = loaded
     assert heavy.command_for(-1.5).brake > empty.command_for(-1.5).brake
-    # And what the heavy truck then does is what was asked for.
+    # And once its brake is known (core.control.longitudinal.BrakeEstimate),
+    # what the heavy truck then does is what was asked for.
+    heavy.brake_ratio = loaded
     command = heavy.command_for(-2.0)
     assert heavy.acceleration_for(command.throttle, command.brake) == pytest.approx(-2.0, abs=0.1)
 
@@ -488,3 +490,49 @@ def test_at_a_stop_the_brake_left_up_is_not_pressed() -> None:
     assert held_still(stopping, speed=2.0, brake_down=False) is stopping, "moving: as asked"
     pulling = LongitudinalCommand(0.3, 0.0, "moving off")
     assert held_still(pulling, speed=0.0, brake_down=False) is pulling
+
+
+def test_the_brake_s_own_strength_is_learned_and_braked_by() -> None:
+    """Near Eindhoven a Scania R's load was taken as 1.42 times the
+    calibrated truck's; its brake gave as the calibrated truck's does, and
+    2.5 m/s^2 asked for gave 3.5 to 4.9."""
+    from core.control.longitudinal import ACTROS_EMPTY, ActuatorMap, BrakeEstimate
+
+    estimate = BrakeEstimate()
+    actual = ActuatorMap()  # the truck: brakes as calibrated
+    for _ in range(int(5 / (1 / 60))):
+        estimate.observe(
+            brake=0.10,
+            throttle=0.001,
+            acceleration=actual.acceleration_for(0.0, 0.10),
+            grade=0.0,
+            speed=12.0,
+            calibration=ACTROS_EMPTY,
+            dt=1 / 60,
+        )
+    assert estimate.ratio == pytest.approx(1.0, abs=0.02)
+    guessed = ActuatorMap()
+    guessed.mass_ratio = 1.42
+    heavy = guessed.command_for(-2.5).brake
+    guessed.reset()
+    guessed.brake_ratio = estimate.ratio
+    learned = guessed.command_for(-2.5).brake
+    assert learned < heavy
+    assert -actual.acceleration_for(0.0, learned) == pytest.approx(2.5, abs=0.15)
+
+
+def test_nothing_is_learned_of_the_brake_with_the_throttle_on_or_slow() -> None:
+    from core.control.longitudinal import ACTROS_EMPTY, BrakeEstimate
+
+    for frame in ({"throttle": 0.3, "speed": 12.0}, {"throttle": 0.0, "speed": 1.0}):
+        estimate = BrakeEstimate()
+        for _ in range(120):
+            estimate.observe(
+                brake=0.10,
+                acceleration=-2.8,
+                grade=0.0,
+                calibration=ACTROS_EMPTY,
+                dt=1 / 60,
+                **frame,
+            )
+        assert estimate.ratio is None

@@ -217,3 +217,41 @@ def test_a_pedal_applied_less_than_sent_is_not_a_foot() -> None:
     gearbox lets the throttle go for every shift: no foot on anything."""
     detector = OverrideDetector(pedal_tolerance=0.2, dwell=0.2)
     assert _pedals(detector, sent=(1.0, 0.0), read=(0.0, 0.0), frames=100) is None
+
+
+def test_a_pedal_the_game_still_shows_from_a_moment_ago_is_not_a_foot() -> None:
+    """Near Venlo (18 November) the game stood still for 0.15 s as the stack
+    let the throttle go from 1.0 to 0.23; it showed 0.53, sent a moment
+    before, and the truck was handed over for a foot that was not there."""
+    from core.control.override import PEDAL_LAG_S, OverrideDetector, RecentPedals
+
+    recent, feet = RecentPedals(), OverrideDetector()
+    now, dt, shown, handed = 0.0, 1 / 60, 1.0, None
+    for k in range(30):
+        sent = max(1.0 - 0.04 * k, 0.0)
+        recent.add(now, sent, 0.0)
+        if k == 10:
+            shown = 0.53  # then the game stands still
+        throttle, brake = recent.most()
+        handed = handed or feet.update_pedals(
+            commanded_throttle=throttle,
+            commanded_brake=brake,
+            input_throttle=shown,
+            input_brake=0.0,
+            dt=dt,
+        )
+        now += dt
+    assert handed is None
+    # A foot that stays on is still a foot, once the lag is past.
+    for _ in range(int((PEDAL_LAG_S + 0.5) / dt)):
+        recent.add(now, 0.0, 0.0)
+        throttle, brake = recent.most()
+        handed = handed or feet.update_pedals(
+            commanded_throttle=throttle,
+            commanded_brake=brake,
+            input_throttle=0.53,
+            input_brake=0.0,
+            dt=dt,
+        )
+        now += dt
+    assert handed is not None and handed.control == "throttle"

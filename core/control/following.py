@@ -147,25 +147,47 @@ def follow(lead: Lead | None, speed: float, policy: GapPolicy | None = None) -> 
             else (policy.min_gap_m)
         )
         room = lead.distance_m - aim
-        needed = MAX_DECELERATION if room <= 0.0 else lead.closing_mps**2 / (2.0 * room)
+        # No more than stopping takes: a lead closing faster than the truck
+        # goes is coming towards it, and braking past a stop does nothing for
+        # that. A low loader turning across in Hamburg seemed to close at
+        # 6.8 m/s on a truck doing 2.5, and was braked for at 7 m/s^2
+        # (16 November); stopping took 0.4.
+        closing = min(-lead.closing_mps, max(speed, 0.0))
+        needed = MAX_DECELERATION if room <= 0.0 else closing**2 / (2.0 * room)
         if needed > COMFORT_DECELERATION:
             urgent = min(needed, MAX_DECELERATION)
             reason = f"closing {-lead.closing_mps:.1f} m/s at {lead.distance_m:.0f} m: braking hard"
     return FollowingDecision(target, urgent, reason)
 
 
-def stop_short(room: float, speed: float, reason: str) -> FollowingDecision:
+def stop_short(room: float, speed: float, reason: str, slack: float = 0.0) -> FollowingDecision:
     """To stop `room` metres on from `speed` (m/s): at `STOP_DECELERATION`,
-    or, too near for comfort, at once (an urgent deceleration). Never faster
-    than now, but for a crawl (`APPROACH_CREEP_MPS`): giving way to a car in
-    a queue out of Milan, the speed it could still stop from was a ceiling
-    the truck sped up to, 12 to 16 km/h, and then braked at 7 m/s^2."""
-    if room <= 0.0:
+    braked for directly (an urgent deceleration) once the truck is over that
+    curve -- the speed controller alone held it there, coasting, until 2.5
+    were needed, and from 0 to 2 m short the stop took 7 m/s^2, five times
+    on one drive to Leipzig (16 November). Never faster than now, but for a
+    crawl (`APPROACH_CREEP_MPS`): giving way to a car in a queue out of
+    Milan, the speed it could still stop from was a ceiling the truck sped up
+    to, 12 to 16 km/h, and then braked at 7 m/s^2.
+
+    `slack`: metres past the place the truck may still stop in when it is
+    come on too late for the place itself -- what lies beyond it before what
+    it stops for -- braked for no harder than that takes."""
+    if room <= 0.0 and (speed <= NO_URGENCY_BELOW_MPS or room + slack <= 0.0):
         urgent = MAX_DECELERATION if speed > NO_URGENCY_BELOW_MPS else None
         return FollowingDecision(0.0, urgent, reason)
-    target = min(math.sqrt(2.0 * STOP_DECELERATION * room), max(speed, APPROACH_CREEP_MPS))
-    needed = speed * speed / (2.0 * room)
-    urgent = min(needed, MAX_DECELERATION) if needed > COMFORT_DECELERATION else None
+    if room <= 0.0:
+        target, needed = 0.0, math.inf
+    else:
+        target = min(math.sqrt(2.0 * STOP_DECELERATION * room), max(speed, APPROACH_CREEP_MPS))
+        needed = speed * speed / (2.0 * room)
+    urgent = None
+    # Slower than `NO_URGENCY_BELOW_MPS` the speed controller's own hold
+    # stops the truck: what a stop needs, worked out over its last few
+    # centimetres, would be a brake at full.
+    if needed > STOP_DECELERATION and speed > NO_URGENCY_BELOW_MPS:
+        within = speed * speed / (2.0 * (room + max(slack, 0.0)))
+        urgent = min(max(within, STOP_DECELERATION), MAX_DECELERATION)
     return FollowingDecision(target, urgent, reason)
 
 

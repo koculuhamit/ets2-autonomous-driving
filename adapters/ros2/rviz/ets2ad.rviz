@@ -1,0 +1,140 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Help Height: 0
+    Splitter Ratio: 0.5
+  - Class: rviz_common/Views
+    Name: Views
+    Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Reference Frame: base_link
+      Cell Size: 10
+      Plane Cell Count: 40
+      Color: 90; 90; 100
+      Alpha: 0.35
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Map lanes
+      Enabled: true
+      Namespaces:
+        {}
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ets2/lanes
+    - Class: rviz_default_plugins/Path
+      Name: Route
+      Enabled: true
+      Buffer Length: 1
+      Color: 0; 200; 255
+      Alpha: 1
+      Line Style: Billboards
+      Line Width: 0.6
+      Pose Style: None
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ets2/route
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Truck and light
+      Enabled: true
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ets2/truck
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Vehicles seen
+      Enabled: true
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ets2/markers
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Arrows: false
+      Show Axes: true
+      Show Names: false
+      Marker Scale: 2
+      Frames:
+        All Enabled: true
+    - Class: rviz_default_plugins/Camera
+      Name: Camera
+      Enabled: true
+      Image Rendering: background and overlay
+      Overlay Alpha: 0.5
+      Zoom Factor: 1
+      Topic:
+        Depth: 2
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /ets2/camera/image_raw/compressed
+      Visibility:
+        Grid: false
+        Map lanes: false
+        Route: true
+        TF: false
+        Truck and light: false
+        Vehicles seen: true
+        Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 30; 32; 38
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/ThirdPersonFollower
+      Name: Behind the truck
+      Target Frame: base_link
+      Distance: 42
+      Focal Point:
+        X: 2
+        Y: 0
+        Z: 0
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Near Clip Distance: 0.01
+      Pitch: 0.42
+      Yaw: 3.14159
+      Value: ThirdPersonFollower (rviz_default_plugins)
+    Saved: ~
+Window Geometry:
+  Width: 1600
+  Height: 900
+  Displays:
+    collapsed: false
+  Camera:
+    collapsed: false
+  Views:
+    collapsed: true

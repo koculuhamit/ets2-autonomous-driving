@@ -75,6 +75,8 @@ BUTTON_BITS: Final = {
     Button.HAZARD: 11,
     Button.ACTIVATE: 12,
     Button.TRAILER_ATTACH: 13,
+    Button.RETARDER_UP: 14,
+    Button.RETARDER_DOWN: 15,
 }
 
 

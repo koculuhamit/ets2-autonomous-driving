@@ -508,3 +508,51 @@ def test_a_head_far_beyond_a_near_line_is_the_next_light_s() -> None:
     assert head_distance(far, CAMERA) > (10.0 + ACROSS_M)
     assert lamps_with_heads(image, [far], nearest_m=10.0) == []
     assert lamps_with_heads(image, [far], nearest_m=40.0) == [LightState.RED], "it may be ours"
+
+
+def _head_image(colour_bgr, row_share: float, lamp_px: int = 3):
+    """A dark frame with one standing signal head at (950..962, 350..380) and
+    a small lit blob `lamp_px` across at `row_share` of its height."""
+    image = np.full((1080, 1920, 3), 40, np.uint8)
+    image[350:381, 950:963] = (25, 25, 25)
+    y = int(350 + row_share * 30)
+    image[y : y + lamp_px, 955 : 955 + lamp_px] = colour_bgr
+    image[y + lamp_px + 1 : y + 2 * lamp_px + 1, 955 : 955 + lamp_px] = colour_bgr
+    return image, (950.0, 350.0, 962.0, 380.0)
+
+
+def test_a_far_head_too_small_for_its_lamp_is_read_whole() -> None:
+    """Near Venlo at sunset a red, a few pixels and broken in two by its
+    lens, was found lamp by lamp in one view of five, and confirmed 15 m
+    short of the line at 48 km/h. Read whole, a detected head shows it."""
+    from core.perception.detection import DEFAULT_CAB_VIEW
+    from core.perception.lights import LightState, find_lamps, reading
+
+    camera = GroundCamera(820.0, 438.0, 960.0, 2.9)
+    red, head = _head_image((30, 30, 250), 0.2)
+    assert reading(find_lamps(red, DEFAULT_CAB_VIEW, camera, heads=[head])) is LightState.RED
+    assert reading(find_lamps(red, DEFAULT_CAB_VIEW, camera, heads=[])) is LightState.UNKNOWN
+    green, _ = _head_image((120, 250, 30), 0.8)
+    assert reading(find_lamps(green, DEFAULT_CAB_VIEW, camera, heads=[head])) is LightState.GREEN
+
+
+def test_a_colour_where_its_lamp_cannot_be_is_not_read() -> None:
+    """A red at the bottom of a standing head is no red lamp of it."""
+    from core.perception.detection import DEFAULT_CAB_VIEW
+    from core.perception.lights import LightState, find_lamps, reading
+
+    camera = GroundCamera(820.0, 438.0, 960.0, 2.9)
+
+    def scattered(row_share: float):
+        # Single lit pixels, two apart: no lamp lamp by lamp, read whole only.
+        image, head = _head_image((25, 25, 25), 0.0, lamp_px=1)
+        y = int(350 + row_share * 30)
+        for dx in (0, 2, 4, 6):
+            for dy in (0, 2, 4):
+                image[y + dy, 953 + dx] = (30, 30, 250)
+        return image, head
+
+    high, head = scattered(0.15)
+    assert reading(find_lamps(high, DEFAULT_CAB_VIEW, camera, heads=[head])) is LightState.RED
+    low, head = scattered(0.75)
+    assert reading(find_lamps(low, DEFAULT_CAB_VIEW, camera, heads=[head])) is LightState.UNKNOWN

@@ -1,0 +1,66 @@
+{
+  "format": "ets2ad-truck-1",
+  "truck": "scania.vehicle.scania.s_2016",
+  "steering_map": null,
+  "brake_dead_zone": null,
+  "brake_curve": null,
+  "camera": "scania.vehicle.scania.s_2016.camera.json",
+  "cab_reference": "scania.vehicle.scania.s_2016.cab.npy",
+  "view": {
+    "windscreen": [
+      0.171875,
+      0.0889,
+      1.0,
+      0.6481481481481481
+    ],
+    "covered": [
+      [
+        0.0,
+        0.07407407407407407,
+        0.13645833333333332,
+        0.375
+      ],
+      [
+        0.8619791666666666,
+        0.07407407407407407,
+        1.0,
+        0.375
+      ],
+      [
+        0.0,
+        0.6435185185185185,
+        0.13020833333333334,
+        0.8796296296296297
+      ],
+      [
+        0.0,
+        0.35185185185185186,
+        0.171875,
+        0.8796296296296297
+      ],
+      [
+        0.7447916666666666,
+        0.5277777777777778,
+        0.8072916666666666,
+        0.6481481481481481
+      ],
+      [
+        0.8125,
+        0.5185185185185185,
+        1.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.8240740740740741,
+        0.10677083333333333,
+        1.0
+      ]
+    ]
+  },
+  "measured": {
+    "camera": "2026-11-16, learned from the driver's driving, 3 recordings under data/calibration/scania.vehicle.scania.s_2016: focal 848 px, horizon row 398.3, eye 2.76 m up",
+    "cab": "2026-11-16, learned from the first frames of a drive",
+    "view": "2026-11-16, windscreen's top learned from a drive"
+  }
+}

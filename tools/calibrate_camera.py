@@ -33,6 +33,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Final
 
 import cv2
 import numpy as np
@@ -192,26 +193,56 @@ def road_motion(path: Path, camera: GroundCamera) -> list[float]:
     return ratios
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("cache", type=Path, help="compiled network, from tools/build_map.py")
-    parser.add_argument("recordings", type=Path, nargs="+")
-    parser.add_argument("--out", type=Path, help="write the camera here as JSON")
-    parser.add_argument(
-        "--every", type=int, default=3, help="look for lane lines in every Nth image"
-    )
-    args = parser.parse_args()
+ENOUGH_STRAIGHT: Final = 40
+ENOUGH_YAW_PAIRS: Final = 80
+ENOUGH_MOTION_PAIRS: Final = 5
+MOST_HORIZON_ERROR_PX: Final = 6.0
+"""What a calibration is taken on (`enough`): straight frames with both lane
+lines for the horizon and the eye's height, view shifts against yaw in turns
+for the focal length, neighbouring frames of road for its scale, and a
+horizon known to within `MOST_HORIZON_ERROR_PX` (its spread over the square
+root of the frames). A DAF XD's 13 minutes gave 69, 154, 7 and 1.4 px; a
+Scania S's cab rocks more -- a spread of 33 to 39 px -- yet its two
+recordings put the horizon at 398.3 and 398.7, 5.6 px known."""
 
-    network = RoadNetwork.open(args.cache)
-    results = [measure(path, network, args.every) for path in args.recordings]
+
+def enough(results: list[dict], motion_pairs: int) -> str:
+    """Why the recordings do not do for a camera yet; empty when they do."""
+    straight = sum(r["straight_frames"] for r in results)
+    yaw = sum(len(r["shifts"]) for r in results)
+    # Over all the recordings together, as the horizon is taken from them:
+    # a Scania S's first two, of 14 and 28 frames, alone were 8.8 and 7.3 px
+    # off; with its third, of 33 at 2.2, all three were known to 3.8.
+    spreads = [r["horizon_spread_px"] for r in results if r["straight_frames"]]
+    spread = [float(np.median(spreads)) / np.sqrt(straight)] if spreads else []
+    missing = []
+    if straight < ENOUGH_STRAIGHT:
+        missing.append(f"{straight} of {ENOUGH_STRAIGHT} views of a straight marked road")
+    if yaw < ENOUGH_YAW_PAIRS:
+        missing.append(f"{yaw} of {ENOUGH_YAW_PAIRS} views in bends")
+    if motion_pairs < ENOUGH_MOTION_PAIRS:
+        missing.append(f"{motion_pairs} of {ENOUGH_MOTION_PAIRS} views of the road moving")
+    if spread and float(np.median(spread)) > MOST_HORIZON_ERROR_PX:
+        missing.append("a horizon that moved: the camera was looked around with")
+    return "; ".join(missing)
+
+
+def calibrate(
+    network: RoadNetwork, recordings: list[Path], every: int = 3, say=print
+) -> tuple[dict | None, str]:
+    """The camera from recordings made with images, as `--out` writes it; or
+    None and why not, when they are not enough yet (`enough`)."""
+    results = [measure(path, network, every) for path in recordings]
     for r in results:
         height = r["lane_width_m"] / r["widening"]
-        print(
+        say(
             f"{r['recording']}: focal {r['focal_px']:.0f} px ({r['yaw_pairs']} yaw pairs), "
             f"horizon row {r['horizon_row']:.1f} (IQR {r['horizon_spread_px']:.1f}), "
             f"centre {r['centre_col']:.1f}, height {height:.2f} m "
             f"({r['straight_frames']} straight frames, lane {r['lane_width_m']:.2f} m)"
         )
+    if not any(r["straight_frames"] for r in results) or not any(r["shifts"] for r in results):
+        return None, enough(results, 0)
 
     yaw_focal, used = focal_from_yaw(
         [s for r in results for s in r["shifts"]], [y for r in results for y in r["yaws"]]
@@ -221,7 +252,7 @@ def main() -> int:
     height = float(
         np.nanmedian([r["lane_width_m"] / r["widening"] for r in results if r["straight_frames"]])
     )
-    print(
+    say(
         f"\nfrom turns: focal {yaw_focal:.0f} px ({used} yaw pairs); horizon row "
         f"{horizon:.1f}, centre {centre:.1f}, height {height:.2f} m"
     )
@@ -230,17 +261,21 @@ def main() -> int:
     # something that did not move come out near zero; keep those near the
     # current estimate and refine twice.
     camera = GroundCamera(yaw_focal, horizon, centre, height)
-    ratios = [q for path in args.recordings for q in road_motion(path, camera)]
-    scale = 1.0
+    ratios = [q for path in recordings for q in road_motion(path, camera)]
+    scale, near = 1.0, ratios
     for _ in range(2):
         near = [q for q in ratios if abs(q / scale - 1.0) < 0.25]
+        if not near:
+            break
         scale = float(np.median(near))
+    why = enough(results, len(near))
+    if why:
+        return None, why
     focal = yaw_focal / scale
-    print(
+    say(
         f"from the road moving: scale {scale:.3f} over {len(near)} of {len(ratios)} pairs "
         f"(IQR {np.percentile(near, 25):.3f}-{np.percentile(near, 75):.3f})"
     )
-    camera = GroundCamera(focal, horizon, centre, height)
     # The lane's middle is m * height to the camera's right and truck_left
     # to the truck's right, so the camera sits truck_left - m * height to the
     # right of the truck's centreline.
@@ -253,21 +288,38 @@ def main() -> int:
             ]
         )
     )
-    print(f"eye {abs(seat):.2f} m {'left' if seat < 0 else 'right'} of the truck's centreline")
-    print(
+    say(f"eye {abs(seat):.2f} m {'left' if seat < 0 else 'right'} of the truck's centreline")
+    say(
         f"\ncamera: focal {focal:.0f} px (horizontal FOV {fov_deg(focal, 1920):.1f} deg), "
         f"horizon row {horizon:.1f}, centre {centre:.1f}, height {height:.2f} m, "
         f"50 m ahead is row {horizon + focal * height / 50:.0f}"
     )
+    camera = GroundCamera(focal, horizon, centre, height, seat)
+    document = {
+        **camera.to_json(),
+        "frame_size": [1920, 1080],
+        "measured_from": [r["recording"] for r in results],
+        "yaw_focal_px": round(yaw_focal, 1),
+        "road_motion_pairs": len(near),
+    }
+    return document, ""
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("cache", type=Path, help="compiled network, from tools/build_map.py")
+    parser.add_argument("recordings", type=Path, nargs="+")
+    parser.add_argument("--out", type=Path, help="write the camera here as JSON")
+    parser.add_argument(
+        "--every", type=int, default=3, help="look for lane lines in every Nth image"
+    )
+    args = parser.parse_args()
+
+    document, why = calibrate(RoadNetwork.open(args.cache), args.recordings, args.every)
+    if document is None:
+        print(f"\nnot enough yet: {why}", file=sys.stderr)
+        return 1
     if args.out:
-        camera = GroundCamera(focal, horizon, centre, height, seat)
-        document = {
-            **camera.to_json(),
-            "frame_size": [1920, 1080],
-            "measured_from": [r["recording"] for r in results],
-            "yaw_focal_px": round(yaw_focal, 1),
-            "road_motion_pairs": len(near),
-        }
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         print(f"-> {args.out}")

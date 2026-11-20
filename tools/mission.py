@@ -56,6 +56,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from core.bridge import convert  # noqa: E402
 from core.bridge.reader import TelemetryError, TelemetryReader  # noqa: E402
+from core.calibration import load_profile, truck_id  # noqa: E402
 from core.map import RoadNetwork  # noqa: E402
 from core.mission import (  # noqa: E402
     DriveEnd,
@@ -66,9 +67,17 @@ from core.mission import (  # noqa: E402
 )
 from core.mission.status import STATUS_FILE, write_status  # noqa: E402
 from pal.base import PalError  # noqa: E402
+from tools.camera_learner import CameraLearner  # noqa: E402
 from tools.plan_route import GPS_ELSEWHERE  # noqa: E402
 
 LOOK_EVERY_S = 0.2
+
+LEARNING = (
+    "{truck} has no camera of its own yet: drive it yourself, 10 to 15 minutes on roads "
+    "with lane markings and some bends, from the cab view (1) without looking around; "
+    "the beacon does not drive it until its camera is learned"
+)
+LEARNED = "the camera of {truck} is learned: switch the beacon on to drive"
 RETRY_S = 2.0
 
 
@@ -117,6 +126,7 @@ def drive_arguments(args) -> list[str]:
         "--yes",
         *(["--keep-frames", str(args.keep_frames)] if args.keep_frames > 0.0 else []),
         *(["--allow-cpu"] if args.allow_cpu else []),
+        *(["--ros"] if args.ros else []),
     ]
 
 
@@ -265,6 +275,18 @@ def main() -> int:
         help="record a view of the road this often while driving, for training (follow.py)",
     )
     parser.add_argument(
+        "--ros",
+        action="store_true",
+        help="send the drive's view to the ROS 2 bridge (adapters/ros2), for RViz2",
+    )
+    parser.add_argument(
+        "--learn-camera",
+        action="store_true",
+        help="for a truck with no camera of its own, learn it from the driver's driving "
+        "before the beacon drives it (tools/camera_learner.py); off: it drives on the "
+        "Actros's camera, distances to vehicles ahead off by as much as half again",
+    )
+    parser.add_argument(
         "--allow-cpu",
         action="store_true",
         help="drive with perception on the CPU, three times slower, where there is no "
@@ -279,14 +301,41 @@ def main() -> int:
     drives = 0
     where = (0.0, 0.0)
     standby: Standby | None = None
+    learner: CameraLearner | None = None
+    truck_seen, profile = "", None
     print("switch the truck's beacon on in the game to drive; Ctrl+C here to quit")
     while True:
         try:
             with TelemetryReader() as reader:
                 while True:
-                    seen = observation(reader.read())
+                    snapshot = reader.read()
+                    seen = observation(snapshot)
                     where = seen.position
+                    current = truck_id(snapshot.block)
+                    if current != truck_seen and not current.startswith("unknown"):
+                        truck_seen, profile = current, load_profile(current)
+                        if learner is not None and learner.truck != current:
+                            learner.stop()
+                            learner = None
+                    # Off by default (the driver's word, 16 November: most trucks look
+                    # calibrated enough; learnt again if something goes wrong).
+                    learning = args.learn_camera and profile is not None and profile.learns_camera()
+                    if learning:
+                        if standby is not None:
+                            standby.cancel()  # its perception has another truck's camera
+                            standby = None
+                        if learner is None:
+                            learner = CameraLearner(current, args.cache)
+                            print(f"[learning] {LEARNING.format(truck=current)}", flush=True)
+                        learner.step()
+                        if learner.learned:
+                            print(f"[learned] {LEARNED.format(truck=current)}", flush=True)
+                            profile, learner, learning = load_profile(current), None, False
                     start = mission.observe(seen)
+                    if start and learning:
+                        # Through another truck's camera every distance is wrong.
+                        mission.cannot_drive(f"camera still being learned: {learner.why}")
+                        start = False
                     if mission.message != told:
                         told = mission.message
                         print(f"[{mission.state.value}] {told}", flush=True)
@@ -299,11 +348,15 @@ def main() -> int:
                             session=str(session),
                         )
                     if not start:
-                        if mission.state is not State.DRIVING and (
-                            standby is None
-                            or (
-                                not standby.alive
-                                and time.monotonic() - standby.started_at >= STANDBY_EVERY_S
+                        if (
+                            not learning
+                            and mission.state is not State.DRIVING
+                            and (
+                                standby is None
+                                or (
+                                    not standby.alive
+                                    and time.monotonic() - standby.started_at >= STANDBY_EVERY_S
+                                )
                             )
                         ):
                             standby = Standby(args)
@@ -333,6 +386,8 @@ def main() -> int:
         except KeyboardInterrupt:
             if standby is not None:
                 standby.cancel()
+            if learner is not None:
+                learner.stop()
             print("\nstopped")
             return 0
         except (PalError, TelemetryError, OSError) as exc:

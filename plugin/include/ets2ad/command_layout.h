@@ -112,7 +112,13 @@ enum CommandButton : std::uint32_t {
      *  under, and unhitches the one hitched. */
     kButtonAttach = 13,
 
-    kButtonCount = 14,
+    /** The retarder lever, a step up or down per press: the gentle
+     *  deceleration between coasting and the service brake's floor, on the
+     *  trucks that have one (`retarder_step_count`). */
+    kButtonRetarderUp = 14,
+    kButtonRetarderDown = 15,
+
+    kButtonCount = 16,
 };
 
 /* Adding buttons does not move any field: `CommandBlock::buttons` is a 32-bit

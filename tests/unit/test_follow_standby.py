@@ -125,7 +125,7 @@ def _standby(monkeypatch, tmp_path: Path, perceptions: list[_Perception], fresh,
     first = _StillReader()
     monkeypatch.setattr(follow, "TelemetryReader", lambda: first)
     monkeypatch.setattr(follow, "truck_id", lambda _block: "truck")
-    monkeypatch.setattr(follow, "load_profile", lambda _truck: None)
+    monkeypatch.setattr(follow, "load_profile", lambda truck: follow.TruckProfile(truck))
     monkeypatch.setattr(follow, "start_perception", start_perception)
     monkeypatch.setattr(follow, "reattached", fresh)
     monkeypatch.setattr(follow, "take_word", lambda *_a, **_k: words.pop(0) if words else None)
@@ -181,3 +181,54 @@ def test_no_view_says_what_the_capture_said() -> None:
     assert no_view(service(off)) == "no view of the road: the game window reaches past the screen"
     assert no_view(service(None)).endswith("is the game in front?")
     assert no_view(service(SimpleNamespace(covered_why=""))).endswith("is the game in front?")
+
+
+def test_a_truck_loaded_after_the_standby_began_gets_perception_for_it(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Read once at the start, with no truck in the game yet, the profile
+    stayed the default's: a DAF XD drove on the Actros's camera and ran into
+    the lorry ahead. The truck that comes is seen, and perception is
+    started again with its camera."""
+    import types
+
+    import tools.follow as follow
+
+    blank, daf = _Perception(), _Perception()
+    started, loaded = [], []
+
+    def start_perception(*_args, truck=None, **_kwargs):
+        started.append(([blank, daf][len(started)], truck.truck))
+        return started[-1][0], object()
+
+    def load_profile(truck):
+        loaded.append(truck)
+        return follow.TruckProfile(truck)
+
+    reader = _StillReader()
+    reads = iter(
+        [types.SimpleNamespace(block="unknown.unknown"), types.SimpleNamespace(block="daf.xd")]
+    )
+
+    def read():
+        snapshot = next(reads, None)
+        if snapshot is None:
+            raise follow.StaleTelemetryError("still")
+        return snapshot
+
+    reader.read = read
+    words = [None, None, "stop"]
+    monkeypatch.setattr(follow, "TelemetryReader", lambda: reader)
+    monkeypatch.setattr(follow, "truck_id", lambda block: block)
+    monkeypatch.setattr(follow, "load_profile", load_profile)
+    monkeypatch.setattr(follow, "start_perception", start_perception)
+    monkeypatch.setattr(follow, "reattached", lambda _r: None)
+    monkeypatch.setattr(follow, "take_word", lambda *_a, **_k: words.pop(0) if words else "stop")
+    monkeypatch.setattr(follow.time, "sleep", lambda _s: None)
+    args = types.SimpleNamespace(
+        standby=tmp_path / "word", camera="camera.json", model=None, allow_cpu=True, cache=None
+    )
+    assert follow.standby_until_go(args) == 0
+    assert loaded == ["unknown.unknown", "daf.xd"]
+    assert [truck for _, truck in started] == ["unknown.unknown", "daf.xd"]
+    assert blank.stopped, "the default's perception let go"

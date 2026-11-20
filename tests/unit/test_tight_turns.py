@@ -371,3 +371,82 @@ def test_only_lanes_near_the_way_out_count_as_coming_out_of_it() -> None:
 
     assert off(-30.0, 4.0) < tight_turns.OVER_AGAINST_M, "the way in's own"
     assert off(30.0, 43.5) >= tight_turns.OVER_AGAINST_M, "coming out of the way out"
+
+
+def test_a_right_turn_kept_off_the_mouth_has_a_wide_line_over_it() -> None:
+    """Uppsala (16 November): kept off the mouth, round a 9.8 m turn the
+    trailer cut 3.4 m inside and knocked a sign down. The driver's choice:
+    over the mouth while it is clear -- a line for that, and the mouth."""
+    route = right_t_junction(14.0)
+    (stretch,) = stretches(route)
+    points = route.points()[:, [0, 2]]
+    first, last = between(points, stretch.approach[0], stretch.exit_[-1])
+    own = points[first : last + 1]
+    wide = tight_turns.wide_turn(
+        route.network, stretch.approach, stretch.exit_, own, stretch.junction
+    )
+    assert wide is not None
+    assert len(wide.mouth) > 0
+    exit_start = stretch.exit_[0]
+    assert np.min(np.hypot(*(wide.mouth - exit_start).T)) < tight_turns.AGAINST_NEAR_EXIT_M
+    kept = shaped_turn(route.network, stretch.approach, stretch.exit_, own, stretch.junction)
+    about = np.vstack([stretch.approach, stretch.exit_])
+    ground, origin = tight_turns._ground(
+        route.network, about, own, stretch.junction, exit_=stretch.exit_, mouth_is_ground=True
+    )
+
+    def strays(line) -> float:
+        return tight_turns._stray(
+            ReferencePath(np.asarray(line, float), spacing=1.0),
+            stretch.approach,
+            ground,
+            origin,
+            tight_turns.DESIGN_TRAILER_M,
+        )
+
+    assert strays(wide.line) <= strays(kept)
+
+
+def test_a_turn_that_keeps_off_the_mouth_as_it_is_has_no_wide_line(shaped) -> None:
+    route, own, _ = shaped
+    (stretch,) = stretches(route)
+    assert (
+        tight_turns.wide_turn(route.network, stretch.approach, stretch.exit_, own, stretch.junction)
+        is None
+    )
+
+
+def test_the_wide_line_is_measured_beside_the_path_to_its_right() -> None:
+    """A line 2 m left of a straight path, joined to it at the ends: shifts
+    of -2 m (left) where it runs beside it, none past it."""
+    from core.planning.tight_turns import WideSpan, shifts_beside
+
+    path = ReferencePath(np.column_stack([np.zeros(101), np.arange(101.0)]), spacing=1.0)
+    along = np.arange(20.0, 61.0)
+    aside = np.interp(along, [20.0, 30.0, 50.0, 60.0], [0.0, 2.0, 2.0, 0.0])
+    # Left of heading +z is +x here: right is (-cos h, sin h) = (-1, 0).
+    line = np.column_stack([aside, along])
+    shifts = shifts_beside(path, line, 20.0, 60.0)
+    assert shifts[15] == pytest.approx(-2.0, abs=0.05)
+    assert shifts[0] == pytest.approx(0.0, abs=0.05)
+    span = WideSpan(20.0, 35.0, shifts, np.zeros((1, 2)))
+    assert span.shift_at(40.0) == pytest.approx(-2.0, abs=0.05)
+    assert span.shift_at(80.0) == 0.0
+    assert span.shift_at(10.0) == 0.0
+
+
+def test_a_turn_whose_line_is_a_point_is_left_as_it_is() -> None:
+    """Out of Eindhoven a turn's stretch on the path was one point: shaping
+    it raised, every drive."""
+    route = right_t_junction(14.0)
+    (stretch,) = stretches(route)
+    point = np.asarray(stretch.approach[-1:], float)
+    assert (
+        shaped_turn(route.network, stretch.approach, stretch.exit_, point, stretch.junction) is None
+    )
+    assert (
+        tight_turns.wide_turn(
+            route.network, stretch.approach, stretch.exit_, point, stretch.junction
+        )
+        is None
+    )

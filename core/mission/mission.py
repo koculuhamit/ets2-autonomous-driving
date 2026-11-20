@@ -180,6 +180,12 @@ class Mission:
         """Whether the drive is to where the game's GPS goes, no job told."""
         return self._job == GPS_JOB
 
+    def cannot_drive(self, why: str) -> None:
+        """The beacon was switched on but the truck is not to be driven:
+        `why` said, and the beacon to go off and on again once it can be."""
+        self._armed = False
+        self._set(State.READY, why)
+
     def drive_ended(self, how: DriveEnd, where: tuple[float, float], detail: str = "") -> None:
         """A drive has ended, `how`, with the truck at `where`."""
         self._armed = False
@@ -187,7 +193,12 @@ class Mission:
             self._crossing_from = where
             self._set(State.CROSSING, "at the crossing: take it from the game's menu")
         elif how is DriveEnd.AT_DEPOT:
-            self._set(State.ARRIVED, "at the depot: park and deliver")
+            self._set(
+                State.ARRIVED,
+                f"{detail}: take the turn, drive on to the gate, park and deliver"
+                if detail
+                else "at the depot: park and deliver",
+            )
         elif how is DriveEnd.DISENGAGED:
             self._set(State.READY, "the driver has the truck: switch the beacon on to drive on")
         else:
@@ -211,6 +222,8 @@ def how_it_ended(
     """How a drive ended, from what tools/follow.py wrote (`reason`, None if
     it wrote nothing), the game's navigation distance left, and how far the
     truck is from the nearest place a ship or train is boarded."""
+    if reason == "service_road":
+        return DriveEnd.AT_DEPOT, "at the turn onto the depot's own road"
     if reason == "end_of_route":
         if nav_distance < ARRIVED_NAV_M:
             return DriveEnd.AT_DEPOT, ""

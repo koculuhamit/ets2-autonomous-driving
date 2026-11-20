@@ -92,6 +92,8 @@ constexpr InputDescriptor kInputs[] = {
     {"flasher4way", "Hazard Lights", SCS_VALUE_TYPE_bool},
     {"activate", "Activate", SCS_VALUE_TYPE_bool},
     {"attach", "Trailer Attach", SCS_VALUE_TYPE_bool},
+    {"retarderup", "Retarder Up", SCS_VALUE_TYPE_bool},
+    {"retarderdown", "Retarder Down", SCS_VALUE_TYPE_bool},
 };
 
 constexpr std::size_t kInputCount = sizeof(kInputs) / sizeof(kInputs[0]);

@@ -487,3 +487,47 @@ def test_a_vehicle_standing_in_the_lane_is_followed_whatever_it_was_read_as() ->
     assert 7 not in cutter.cutting_in([seen], lane, 0.0, 14.3)
     lead = lead_vehicle([seen], lane, cutting_in=frozenset())
     assert lead is not None and lead[0] is seen
+
+
+def test_a_lorry_in_the_lane_s_middle_is_the_lead_however_wide_it_measures() -> None:
+    """A DAF XD on the Actros's camera measured the lorry ahead 6.6 to 11.7 m
+    wide, let it go, and ran into it at 80 km/h."""
+    from core.perception.service import TrackReport
+
+    lorry = TrackReport(2, "truck", True, True, 38.0, -6.0, 0.3, 9.0)
+    assert lead_vehicle([lorry], None) is not None
+    beside = TrackReport(3, "truck", True, True, 38.0, -6.0, 1.6, 9.0)
+    assert lead_vehicle([beside], None) is None, "a wide one off the middle stays out"
+    car = TrackReport(4, "car", True, True, 38.0, -6.0, 0.3, 9.0)
+    assert lead_vehicle([car], None) is None, "no car is that wide"
+    portal = TrackReport(5, "truck", True, True, 38.0, -6.0, 0.3, 38.0)
+    assert lead_vehicle([portal], None) is None, "no vehicle is that wide: a tunnel's portal"
+    assert lead_vehicle([lorry], None, exclude=frozenset({2})) is None, "one going across"
+
+
+def test_a_box_whose_distance_jumps_begins_its_history_again() -> None:
+    """Near Eindhoven a lorry's box was put at 96 to 101 m -- its foot not
+    where it met the road -- then at 24 m, the same track; its history made
+    it close at the truck's own 12 m/s, and the truck braked at 6.3 m/s^2."""
+    from core.perception.detection import Detection
+
+    tracker = Tracker(CAMERA)
+    near = seen(24.0, 0.0)
+    left, top, right, _ = near.box
+    # The same box, its foot read high up: 60 m off.
+    far_bottom = CAMERA.horizon_row + CAMERA.focal_px * CAMERA.height_m / 60.0
+    far = Detection(near.kind, 0.9, (left, top, right, far_bottom))
+    for k in range(10):
+        tracker.update([far], k / 20)
+    for k in range(10, 16):
+        tracker.update([near], k / 20)
+    (track,) = tracker.tracks
+    distance, closing, _, _ = track.estimate()
+    assert distance == pytest.approx(24.0, abs=0.5)
+    assert closing > -2.0, "no closing speed made of the jump"
+
+
+def test_a_vehicle_closing_fast_but_steadily_keeps_its_history() -> None:
+    tracker = Tracker(CAMERA)
+    (track,) = drive(tracker, 30, lead=(lambda t: 60.0 - 20.0 * t, 0.0, 2.5))
+    assert track.estimate()[1] == pytest.approx(-20.0, rel=0.1)

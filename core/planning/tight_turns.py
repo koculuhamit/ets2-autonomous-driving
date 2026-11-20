@@ -51,13 +51,18 @@ __all__ = [
     "TIGHT_CUT_M",
     "Stretch",
     "Turn",
+    "WideSpan",
+    "WideTurn",
     "between",
     "kept_in",
     "shaped_turn",
+    "shifts_beside",
     "splice",
     "stretches",
     "tight_turn_spans",
     "tight_turns",
+    "wide_spans",
+    "wide_turn",
 ]
 
 DESIGN_TRAILER_M: Final = 9.0
@@ -361,7 +366,9 @@ def shaped_turn(
     is the turn's lanes, whose junction is ground all over."""
     approach = _tail(np.asarray(approach, float), APPROACH_M + 20.0)
     exit_ = _head(np.asarray(exit_, float), EXIT_M + 20.0)
-    if len(approach) < 3 or len(exit_) < 3:
+    if len(approach) < 3 or len(exit_) < 3 or len(_headings(np.asarray(lane_line, float))) == 0:
+        # A route's line not found about the turn: out of Eindhoven its
+        # stretch on the path was a point, and its ground had no way to go.
         return None
     outside, origin = _ground(
         network, np.vstack([approach, exit_]), lane_line, junction, exit_=exit_
@@ -406,6 +413,159 @@ def shaped_turn(
     if own - BETTER_BY_M < GOOD_ENOUGH_M:
         return None  # good enough
     return _deepest_better(approach, exit_, clear(), origin, trailer_length, own)
+
+
+@dataclass(frozen=True, slots=True)
+class WideTurn:
+    """A line round a turn over the mouth of the road turned into, for
+    when nothing waits there (the driver's choice, 16 November): kept off
+    it, round a 9.8 m turn in Uppsala the trailer cut 3.4 m inside and
+    knocked a sign down."""
+
+    line: NDArray[np.float64]
+    """`(n, 2)` world (x, z), from the way in to the way out."""
+    mouth: NDArray[np.float64]
+    """`(m, 2)` world (x, z) of the lanes coming out of the road turned
+    into, near the way out: where a vehicle waiting would be."""
+
+
+def wide_turn(
+    network,
+    approach: NDArray[np.floating],
+    exit_: NDArray[np.floating],
+    lane_line: NDArray[np.floating],
+    junction: tuple[int, ...] = (),
+    *,
+    trailer_length: float = DESIGN_TRAILER_M,
+) -> WideTurn | None:
+    """The line round a turn to the exit side on which the rig strays
+    least, the mouth of the road turned into counted as ground -- the
+    route's own `lane_line`, or one into the junction deeper -- and that
+    mouth; None for a turn whose own line keeps off the mouth, or one across
+    the oncoming lanes."""
+    approach = _tail(np.asarray(approach, float), APPROACH_M + 20.0)
+    exit_ = _head(np.asarray(exit_, float), EXIT_M + 20.0)
+    if len(approach) < 3 or len(exit_) < 3:
+        return None
+    lane_line = np.asarray(lane_line, float)
+    if len(_headings(lane_line)) == 0:
+        return None
+    about = np.vstack([approach, exit_])
+    barred, origin = _ground(network, about, lane_line, junction, exit_=exit_)
+    own_path = ReferencePath(lane_line, spacing=1.0)
+    if _stray(own_path, approach, barred, origin, trailer_length) < OVER_AGAINST_M:
+        return None  # keeps off the mouth as it is
+    if not _to_exit_side(network, lane_line, junction):
+        return None
+    mouth = _mouth(network, about, lane_line, exit_)
+    if len(mouth) == 0:
+        return None
+    ground, origin = _ground(network, about, lane_line, junction, exit_=exit_, mouth_is_ground=True)
+    own = _stray(own_path, approach, ground, origin, trailer_length)
+    line = lane_line
+    if own - BETTER_BY_M >= GOOD_ENOUGH_M:
+        deeper = _deepest_better(approach, exit_, ground, origin, trailer_length, own)
+        if deeper is not None:
+            line = deeper
+    return WideTurn(np.asarray(line, float), mouth)
+
+
+@dataclass(frozen=True, slots=True)
+class WideSpan:
+    """A wide turn along a path: how far right of the path its line runs,
+    metre by metre, for the steering to aim that much aside
+    (core.control.lateral, `aim_shift`) when the mouth is clear."""
+
+    begins: float
+    """Metres along the path the shifts begin at."""
+    turns_at: float
+    """Where along the path the junction begins: the choice is held from here."""
+    shifts: NDArray[np.float64]
+    """Metres right of the path, one a metre from `begins`."""
+    mouth: NDArray[np.float64]
+
+    @property
+    def ends(self) -> float:
+        return self.begins + len(self.shifts) - 1.0
+
+    def shift_at(self, s: float) -> float:
+        if not self.begins <= s <= self.ends:
+            return 0.0
+        return float(np.interp(s - self.begins, np.arange(len(self.shifts)), self.shifts))
+
+
+def wide_spans(route, path, wides: dict) -> list[WideSpan]:
+    """The wide turns (`wide_turn`, by their stretch's key in `wides`) of
+    `route` along `path`."""
+    spans = []
+    for stretch in stretches(route):
+        wide = wides.get(stretch.key)
+        if wide is None:
+            continue
+        line = _even(np.asarray(wide.line, float))
+        if len(line) < 3:
+            continue
+        length = float(len(line) - 1)
+        begins = path.nearest(float(line[0][0]), float(line[0][1])).s
+        ends = path.nearest(
+            float(line[-1][0]), float(line[-1][1]), near=begins + length, window=length + 50.0
+        ).s
+        if ends - begins < 2.0:
+            continue
+        first = np.asarray(route.network.lane_points(stretch.junction[0]), float)[0, [0, 2]]
+        turns_at = path.nearest(
+            float(first[0]), float(first[1]), near=begins + APPROACH_M, window=length + 50.0
+        ).s
+        spans.append(
+            WideSpan(begins, turns_at, shifts_beside(path, line, begins, ends), wide.mouth)
+        )
+    return spans
+
+
+def shifts_beside(path, line, begins: float, ends: float) -> NDArray[np.float64]:
+    """How far right of `path` the line `line` (`(n, 2)` world x, z, about
+    1 m apart) runs, one a metre from `begins` along it to `ends`: to the
+    nearest of its points, across the path's way only."""
+    line = np.asarray(line, float)
+    shifts = []
+    for s in np.arange(begins, ends + 0.5, 1.0):
+        point = path.sample_at(float(s))
+        nearest = line[int(np.argmin(np.hypot(line[:, 0] - point.x, line[:, 1] - point.z)))]
+        # Right of a heading h is (-cos h, sin h) (core.control.lateral).
+        right = (-math.cos(point.heading), math.sin(point.heading))
+        shifts.append((nearest[0] - point.x) * right[0] + (nearest[1] - point.z) * right[1])
+    return np.asarray(shifts)
+
+
+def _mouth(network, about, line, exit_) -> NDArray[np.float64]:
+    """The points of the lanes coming out of the road turned into, within
+    `AGAINST_NEAR_EXIT_M` of the way out (`_ground`'s barred lanes)."""
+    exit_ = np.asarray(exit_, float)
+    low = np.asarray(about, float).min(axis=0) - GROUND_MARGIN_M
+    high = np.asarray(about, float).max(axis=0) + GROUND_MARGIN_M
+    centre = (low + high) / 2.0
+    reach = float(np.hypot(*(high - low))) / 2.0 + 30.0
+    against = float(_headings(np.asarray(line, float))[-1]) + math.pi
+    hidden = network.lane_hidden
+    found = []
+    for lane in network.lanes_near(float(centre[0]), float(centre[1]), reach):
+        lane = int(lane)
+        if hidden is not None and bool(hidden[lane]):
+            continue
+        points = np.asarray(network.lane_points(lane))[:, [0, 2]]
+        if len(points) < 2:
+            continue
+        steps = np.diff(points, axis=0)
+        going = np.arctan2(steps[:, 0], steps[:, 1])
+        coming_out = np.abs(np.mod(going - against + np.pi, 2.0 * np.pi) - np.pi)
+        middles = (points[:-1] + points[1:]) / 2.0
+        gaps = np.hypot(
+            middles[:, None, 0] - exit_[None, :, 0], middles[:, None, 1] - exit_[None, :, 1]
+        ).min(axis=1)
+        keep = (coming_out <= AGAINST_EXIT_RAD) & (gaps <= AGAINST_NEAR_EXIT_M)
+        if keep.any():
+            found.append(middles[keep])
+    return np.vstack(found) if found else np.zeros((0, 2))
 
 
 def _deepest_better(approach, exit_, outside, origin, trailer_length: float, than: float):
@@ -627,7 +787,14 @@ _BOX_SIDES = np.tile([-1.0, 1.0], 7)
 
 
 def _ground(
-    network, about, line, junction: tuple[int, ...] = (), *, exit_=None, clear: float = 0.0
+    network,
+    about,
+    line,
+    junction: tuple[int, ...] = (),
+    *,
+    exit_=None,
+    clear: float = 0.0,
+    mouth_is_ground: bool = False,
 ) -> tuple[NDArray[np.float32], tuple[float, float]]:
     """How far each cell of the ground about the points `about` is from the
     lanes': those of the junction of the lanes `junction`, but for the ones
@@ -635,7 +802,9 @@ def _ground(
     those going the ways `line` goes, the route's own through the turn.
     Those coming out of the road turned into are `OVER_AGAINST_M` off: with
     `exit_`, the way out, only within `AGAINST_NEAR_EXIT_M` of it; and
-    `clear` metres wider than their lane."""
+    `clear` metres wider than their lane. With `mouth_is_ground`, those near
+    the way out are ground like the rest: for a line over the mouth of the
+    road turned into while nothing waits there (`wide_turn`)."""
     near_exit = None
     if exit_ is not None and len(exit_):
         near_exit = np.asarray(exit_, float)
@@ -675,6 +844,9 @@ def _ground(
             ).min(axis=1)
             out_of_exit &= gaps <= AGAINST_NEAR_EXIT_M
         same_way = (np.mod(going - least, 2.0 * np.pi) <= sweep) | (owners[lane] in box)
+        if mouth_is_ground:
+            same_way |= out_of_exit
+            out_of_exit = np.zeros_like(out_of_exit)
         same_way &= ~out_of_exit
         cells = np.round((points - origin) / CELL_M).astype(np.int32)
         for run in np.split(np.arange(len(steps)), np.flatnonzero(np.diff(same_way)) + 1):

@@ -101,6 +101,15 @@ the route wanted, and the truck stood beside it at the green, for good."""
 RETURN_M: Final = 60.0
 """A change given up for a lane seen taken eases back over this far."""
 
+NIGHT_LATE_M: Final = 60.0
+NIGHT_LATE_S: Final = 6.0
+"""At night a change that can wait begins this far, or this long at the
+truck's speed, whichever is more, before its latest start, not at its start:
+on a motorway near Bern by night the mirror showed nothing of a lorry beside
+the truck, the change began the moment it could, and the truck's side
+caught the lorry's (the driver's word, 15 November: as late as it can).
+Waiting there, the truck keeps its speed."""
+
 LATE_CHANGE_MIN_S: Final = 4.8
 LATE_CHANGE_MIN_M: Final = 60.0
 """A change held past its latest start -- a route taken with its start
@@ -420,8 +429,10 @@ class LaneChangeGate:
         now: float,
         mirror: tuple[int, float] | None = None,
         mirror_far: tuple[int, float] | None = None,
+        night: bool = False,
     ) -> GateDecision:
-        """The cap for the next lane change, and the line where it changes.
+        """The cap for the next lane change, and the line where it changes;
+        at `night`, begun as late as it can be (`NIGHT_LATE_M`).
 
         `tracks` are the perception report's measured tracks (distance,
         closing, lateral from the eye, width); `unseen` is (id, box middle's
@@ -462,6 +473,18 @@ class LaneChangeGate:
         if why is None and fast_behind:
             why = "a vehicle coming up fast in it, in the mirror"
         side = "right" if change.side > 0 else "left"
+        if night and change.latest is not None and state in (AHEAD, HELD):
+            night_from = max(
+                change.start, change.last_start - max(NIGHT_LATE_M, NIGHT_LATE_S * speed)
+            )
+            if progress < night_from:
+                if progress < change.start:
+                    return GateDecision(None, "")
+                held = self._held(index) if state == AHEAD else None
+                self._state[index] = HELD
+                return GateDecision(
+                    None, f"lane on the {side}: at night, changed as late as it can", path=held
+                )
         if why is not None and change.can_miss and speed > STOP_BELOW_MPS:
             self._fast.add(index)
         waits = not change.can_miss or (speed <= STOP_BELOW_MPS and index not in self._fast)

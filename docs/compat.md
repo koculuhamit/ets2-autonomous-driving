@@ -38,6 +38,7 @@ here and re-checked against a fresh `controls.sii` after any update.
 | Buttons | `parkingbrake`, `engine`, `gearup`, `geardown`, `lblinker`, `rblinker`, `horn`, `light`, `motorbrake`, `engbrakeup`, `engbrakedwn` | |
 | Hazard lights | `flasher4way` | was registered as `hazard`, which is no mix: the lights never came on |
 | Activate (Enter) | `activate` | bound, unused: it filled the tank at a pump before refuelling was left to the driver |
+| Retarder | `retarderup`, `retarderdown` | a step per press; the level read back from `retarder_level` (core/control/retarder.py) |
 | Trailer attach (T) | `attach` | bound, unused: it hitched the trailer before parking and hitching were left to the driver |
 
 The version is the pack set's, from the game's own log:

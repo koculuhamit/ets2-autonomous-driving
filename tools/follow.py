@@ -40,7 +40,7 @@ import threading
 import time
 import traceback
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -59,7 +59,7 @@ import numpy as np  # noqa: E402
 from core.bridge import convert  # noqa: E402
 from core.bridge.command import SAFETY_STOP_S, Commander, ControlCommand  # noqa: E402
 from core.bridge.reader import StaleTelemetryError, TelemetryError, TelemetryReader  # noqa: E402
-from core.calibration import TruckProfile, load_profile, truck_id  # noqa: E402
+from core.calibration import TruckProfile, load_profile, save_profile, truck_id  # noqa: E402
 from core.common.controls import Button  # noqa: E402
 from core.control.acc import (  # noqa: E402
     AdaptiveCruise,
@@ -100,20 +100,31 @@ from core.control.longitudinal import (  # noqa: E402
     HOLD_BELOW,
     STOP_TARGET,
     ActuatorMap,
+    BrakeEstimate,
     LongitudinalCommand,
     SpeedController,
     held_still,
     mass_ratio,
 )
-from core.control.override import OverrideDetector  # noqa: E402
+from core.control.override import OverrideDetector, RecentPedals  # noqa: E402
 from core.control.parking import MOVE_OFF_S, ParkingBrake, StopLatch  # noqa: E402
+from core.control.retarder import RetarderEstimate, RetarderLever  # noqa: E402
 from core.control.steering import (  # noqa: E402
     STEERING_CALIBRATION,
     SteeringPositionController,
     centring_at,
     rate_gain_at,
 )
-from core.control.traffic_light import LightLine, TrafficLights, lines_on_path  # noqa: E402
+from core.control.traffic_light import (  # noqa: E402
+    STOP_SHORT_M,
+    LightLine,
+    TrafficLights,
+    ViewBounds,
+    lines_on_path,
+    stop_short_from_sightings,
+    stop_short_to_see,
+)
+from core.control.turn_line import WideTurnChoice  # noqa: E402
 from core.evaluation.health import HealthSampler  # noqa: E402
 from core.localization.path import (  # noqa: E402
     ReferencePath,
@@ -125,7 +136,7 @@ from core.map.fuel import load_pumps  # noqa: E402
 from core.perception.lanes import LANE_CHECK_M  # noqa: E402
 from core.perception.lights import LightFilter, LightState, is_daylight  # noqa: E402
 from core.planning.destination import GPS_COMPANY, place_from  # noqa: E402
-from core.planning.game_route import GameRouter  # noqa: E402
+from core.planning.game_route import GameRouter, depot_goals  # noqa: E402
 from core.planning.gps import REGION as GPS_REGION  # noqa: E402
 from core.planning.gps import GpsRouter, unpack_mask  # noqa: E402
 from core.planning.gps_follow import GpsFollower  # noqa: E402
@@ -136,17 +147,22 @@ from core.planning.route import (  # noqa: E402
     RouteError,
     load_points,
     load_stop_lines,
+    service_road_stop,
 )
-from core.planning.speed_profile import SpeedProfile  # noqa: E402
+from core.planning.speed_profile import DEFAULT_MAX_LATERAL, SpeedProfile  # noqa: E402
 from core.planning.tight_turns import (  # noqa: E402
     Stretch,
+    WideTurn,
     between,
     shaped_turn,
     splice,
     stretches,
     tight_turn_spans,
+    wide_spans,
+    wide_turn,
 )
 from core.recording import Recorder, open_recording  # noqa: E402
+from core.recording.messages import MessageLog, keep_messages  # noqa: E402
 from pal import PalError  # noqa: E402
 
 MS_TO_KMH = 3.6
@@ -271,6 +287,8 @@ def start_perception(
         camera,
         black_box=black_box,
         cab_reference=truck.cab_file(),
+        learn_cab=truck.learns_cab(),
+        learn_roof=truck.learns_roof(),
     )
     service.start()
     if not allow_cpu and service.provider != "CUDAExecutionProvider":
@@ -286,6 +304,127 @@ def start_perception(
     why = no_view(service)
     service.stop()
     raise RuntimeError(f"{why} within 5 s")
+
+
+BRAKE_TRUSTED_AFTER_S = 1.0
+"""Braking seen this long, the brake's own strength is gone by, not the
+load's (core.control.longitudinal.BrakeEstimate)."""
+
+TURNING_LATERAL_MPS2 = DEFAULT_MAX_LATERAL
+TURNING_FROM_RADIUS_M = 40.0
+"""While the wheel is turned for a bend tighter than `TURNING_FROM_RADIUS_M`,
+the truck gathers no speed beyond what that bend takes at
+`TURNING_LATERAL_MPS2`: round a corner in Berlin the planned speed went up
+with the wheel near lock and the truck met a lamp post at 20 km/h. A
+motorway's bends are wider and are left alone. At the speed profile's own
+lateral acceleration, no lower (the driver's word, 16 November: 1.5 had
+the truck crawl round corners at 12 km/h)."""
+
+
+def turning_cap(geometry, steering: float) -> float | None:
+    """The speed the bend the wheel is turned for takes, m/s; None for a
+    bend wider than `TURNING_FROM_RADIUS_M`."""
+    angle = abs(geometry.angle_for_command(steering))
+    if angle <= 1e-6:
+        return None
+    radius = geometry.wheelbase / math.tan(angle)
+    if radius >= TURNING_FROM_RADIUS_M:
+        return None
+    return math.sqrt(TURNING_LATERAL_MPS2 * radius)
+
+
+LIGHT_STOP_FROM_M = 40.0
+"""How near a light at red or amber its lamps are measured from for where to
+stop (core.control.traffic_light.stop_short_to_see)."""
+
+
+LIGHT_STOP_MOVE_DECELERATION = 1.5
+"""A light's stop is moved back, to keep its lamp in view, no further than
+the truck can still stop short of at this: moved 10 m back 32 m short of
+the line at 38 km/h, a red was braked for at 4 to 5.4 m/s^2, three times on
+one drive (18 November)."""
+
+
+def moved_stop(before: float, wanted: float, to_line: float, speed: float) -> float:
+    """Where before a light's line to stop, metres, from `before` towards
+    `wanted`: on towards the line at once, back from it only as far as is
+    stopped short of at `LIGHT_STOP_MOVE_DECELERATION` from `speed`, `to_line`
+    metres short of it."""
+    if wanted <= before:
+        return wanted
+    reachable = to_line - max(speed, 0.0) ** 2 / (2.0 * LIGHT_STOP_MOVE_DECELERATION)
+    return max(before, min(wanted, reachable))
+
+
+LAMP_FOLLOWED_PX = 120.0
+"""A lamp seen within this of the one followed, a view later, is it."""
+
+
+def follow_lamp(
+    sightings: list[tuple[float, float, float]],
+    to_line: float,
+    points: list[tuple[float, float]],
+) -> list[tuple[float, float, float]]:
+    """`sightings` of one lamp with this view's added: the lamp nearest the
+    last sighting, or, with none near it, the one furthest out from the
+    middle of the view -- the first to go out of it -- begun afresh."""
+    if sightings:
+        _, x, y = sightings[-1]
+        near = min(points, key=lambda p: math.hypot(p[0] - x, p[1] - y))
+        if math.hypot(near[0] - x, near[1] - y) <= LAMP_FOLLOWED_PX:
+            return [*sightings, (to_line, *near)]
+    first = max(points, key=lambda p: math.hypot(p[0] - 960.0, p[1] - 540.0))
+    return [(to_line, *first)]
+
+
+def view_bounds(profile) -> ViewBounds:
+    """What of a 1920 x 1080 frame shows the road through `profile`'s cab:
+    its windscreen, less its mirrors and HUD."""
+    view = profile.cab_view()
+    return ViewBounds(
+        *view.windscreen.pixels(1920, 1080),
+        covered=tuple(rect.pixels(1920, 1080) for rect in view.covered),
+    )
+
+
+def eye_ahead_m(block) -> float:
+    """How far ahead of the truck's reference point its driver's eye is:
+    over the front axle, as in a cab-over truck (the steered wheels', in
+    the vehicle's space, z backwards)."""
+    wheels = block["truck"]["wheels"]
+    count = int(wheels["count"])
+    ahead = [
+        -float(wheels["position"][i]["z"]) for i in range(count) if int(wheels["steerable"][i])
+    ]
+    return max(ahead) if ahead else 0.0
+
+
+def pedals_taken(truck) -> float:
+    """How much of a pedal the game has from the stack: the larger of what it
+    applies and what its input reads. An electric DAF XF brakes with its
+    motor -- 0.2 to 0.3 of brake read, the truck slowing at 1.9 m/s^2 -- and
+    its applied brake stayed under 0.07, so two drives were handed over as if
+    the game took no input (core.control.limits, `InputsNotApplied`)."""
+    return max(
+        float(truck["effective_throttle"]),
+        float(truck["effective_brake"]),
+        float(truck["input_throttle"]),
+        float(truck["input_brake"]),
+    )
+
+
+def uncalibrated(truck: TruckProfile) -> str:
+    """What a truck drives on that is not its own, in words for the driver;
+    empty for one calibrated."""
+    missing = truck.missing()
+    if not missing:
+        return ""
+    said = f"not calibrated: the Actros's {', '.join(missing)} (tools/calibrate.py)"
+    if "camera" in missing:
+        said += "; distances to the vehicles ahead may be off"
+    if truck.learns_cab() is not None:
+        said += "; its dashboard is learned in the drive's first 20 s: drive from the cab view (1)"
+    return said
 
 
 def no_view(service) -> str:
@@ -366,6 +505,9 @@ class Standing:
     perception: object
     camera: object
     went_at: float
+    truck: str = ""
+    """The truck perception was started for (`truck_id`): its camera, view
+    and dashboard."""
     """`time.perf_counter()` when it was told to go."""
 
     took: str = ""
@@ -447,6 +589,9 @@ def standby_until_go(args) -> Standing | int:
         print(f"cannot reach the game: {exc}", file=sys.stderr)
         return 1
     truck = load_profile(truck_id(reader.read().block))
+    told = uncalibrated(truck)
+    if told:
+        print(f"standby: truck {truck.truck}: {told}", flush=True)
     camera_file = truck.camera_file() if args.camera == DEFAULT_CAMERA else args.camera
     perception = camera = None
     tried_at = -math.inf
@@ -506,6 +651,24 @@ def standby_until_go(args) -> Standing | int:
         except (PalError, TelemetryError) as exc:
             print(f"standby: lost the game: {exc}", file=sys.stderr)
             return give_up(1)
+        current = truck_id(block)
+        if current != truck.truck and not current.startswith("unknown"):
+            # Read once at the start, the truck was the one the game had then:
+            # none yet, or another. A DAF XD drove on the Actros's camera,
+            # saw the lorry ahead 7 to 12 m wide -- no vehicle ahead is -- and
+            # ran into its back at 80 km/h (15 November). Perception is
+            # started again with this truck's camera, view and dashboard.
+            truck = load_profile(current)
+            camera_file = truck.camera_file() if args.camera == DEFAULT_CAMERA else args.camera
+            said = uncalibrated(truck) or "calibrated"
+            print(f"standby: truck {truck.truck}: {said}", flush=True)
+            if perception is not None:
+                perception.stop()
+                perception, tried_at = None, -math.inf
+            continue
+        if args.tap is not None:
+            args.tap.pose(now, block)
+            args.tap.status(now, "standby: switch the beacon on to drive")
         job = convert.job_target(block) if int(block["job"]["job_active"]) else None
         if job != weighed_for and not reader.read().is_paused:
             weighed_for = job
@@ -571,7 +734,7 @@ def standby_until_go(args) -> Standing | int:
             return give_up(1)
         args.route, args.output, args.outcome = route, folder, outcome
         took = f"planning {looking - planning:.1f} s, a view {time.perf_counter() - looking:.1f} s"
-        return Standing(reader, perception, camera, went_at, took)
+        return Standing(reader, perception, camera, went_at, took, truck.truck)
 
 
 def doublet(elapsed: float, amplitudes: list[float]) -> float:
@@ -604,6 +767,37 @@ TRAILER_LOOKBACK = 12.0
 
 
 KEEP_FROM_MPS = 1.0
+
+ROS_VIEW_EVERY_S = 0.2
+"""How often a view of the road goes to the ROS 2 bridge (`--ros`): JPEG at
+the frame's own size, encoded in the perception child."""
+
+
+def ros_tap():
+    """The ROS 2 bridge's mailbox (adapters/ros2/feed.py): it never waits,
+    and with no bridge listening drops what it is given."""
+    from adapters.ros2.feed import Feed, Tap
+
+    feed = Feed()
+    print(f"ROS 2: the drive's view goes to {feed.path} once a bridge listens", flush=True)
+    return Tap(feed)
+
+
+def tell_ros(tap, now: float, block, path, driven, report, camera, following) -> None:
+    """One turn of the drive, told to the ROS 2 bridge."""
+    tap.pose(now, block)
+    position = block["truck"]["placement"]["position"]
+    x, y, z = float(position["x"]), float(position["y"]), float(position["z"])
+    if path is not None:
+        tap.route(now, path.points, height=y)
+    tap.lanes(now, getattr(driven, "network", None), x, z)
+    if report is not None and camera is not None:
+        lead = getattr(following, "lead_id", None) if following is not None else None
+        tap.objects(now, report, camera, lead_id=lead)
+    reason = following.decision.reason if following is not None else ""
+    tap.status(now, "driving" if block["truck"]["light_beacon"] else "handed over", reason)
+
+
 """Views of the road are kept (`--keep-frames`) only moving at least this fast."""
 
 JUNCTION_STOP_SNAPSHOT_S = 2.0
@@ -978,6 +1172,10 @@ LATE_VIEW_S = 1.0
 #: While the view is late the target is this much under the truck's speed:
 #: slowing, gently, rather than driving on blind at speed.
 LATE_VIEW_SLOWING_MPS = 2.0
+
+OUT_OF_CAB_GIVE_UP_S = 8.0
+"""The game's camera out of the cab this long, the drive stops; till then the
+truck slows as for a view late (`LATE_VIEW_SLOWING_MPS`)."""
 
 
 def late_but_not_lost(report, now: float) -> bool:
@@ -1552,6 +1750,12 @@ def main() -> int:
         help="with --acc, record a view of the road this often while moving, for training",
     )
     parser.add_argument(
+        "--ros",
+        action="store_true",
+        help="send the drive's view to the ROS 2 bridge (adapters/ros2): pose, route, lanes, "
+        "what perception sees, and a view of the road five times a second",
+    )
+    parser.add_argument(
         "--above-road-limit",
         action="store_true",
         help=(
@@ -1589,6 +1793,7 @@ def main() -> int:
     args = parser.parse_args()
 
     standing = None
+    args.tap = ros_tap() if args.ros else None
     if args.standby is not None:
         standing = standby_until_go(args)
         if isinstance(standing, int):
@@ -1695,11 +1900,8 @@ def main() -> int:
         return 1
     first = reader.read().block
     truck = load_profile(truck_id(first))
-    missing = truck.missing()
-    print(
-        f"truck {truck.truck}: "
-        + (f"the Actros's {', '.join(missing)} (tools/calibrate.py)" if missing else "calibrated")
-    )
+    truck_profile = truck  # `truck` is the telemetry's in the loop
+    print(f"truck {truck.truck}: {uncalibrated(truck) or 'calibrated'}")
     camera_file = truck.camera_file() if args.camera == DEFAULT_CAMERA else args.camera
     if is_planned(args.route) and not args.start:
         block = reader.read().block
@@ -1736,6 +1938,7 @@ def main() -> int:
             path = joined
             profile = SpeedProfile(path, max_lateral_acceleration=args.lateral, max_speed=target)
 
+    messages_file = None
     recorder = Recorder(
         output,
         notes=f"following {args.route.name} at {args.speed:.0f} km/h",
@@ -1752,7 +1955,7 @@ def main() -> int:
             },
         },
     )
-    perception = cruise = gate = None
+    perception = cruise = gate = camera = None
     indicators = None
     signalled: Route | None = None  # the route the indicators are for
     # Where a missed lane change left the route, and the speeds along the
@@ -1760,7 +1963,17 @@ def main() -> int:
     held_profile: tuple[float, SpeedProfile] | None = None
     if args.acc:
         try:
-            if standing is not None:
+            if standing is not None and standing.truck != truck.truck:
+                # Made ready for another truck, or for none: its camera would
+                # put every distance wrong.
+                print(
+                    f"perception was ready for {standing.truck or 'no truck'}: "
+                    f"started again for {truck.truck}",
+                    file=sys.stderr,
+                )
+                standing.perception.stop()
+                standing = replace(standing, perception=None)
+            if standing is not None and standing.perception is not None:
                 perception, camera = standing.perception, standing.camera
                 perception.write_black_box_to(output / "events")
             else:
@@ -1799,6 +2012,16 @@ def main() -> int:
     lane_log: list[tuple] = []
     lane_sequence = -1
     kept_every = 0.0
+    recorded_at = -math.inf
+    following = None
+    service_stop: float | None = None  # before a depot's own road (`PathMarks`)
+    # How far before the next light's line to stop to keep it in view, and
+    # that line (core.control.traffic_light.stop_short_to_see).
+    light_stop, light_stop_at = STOP_SHORT_M, None
+    light_view = view_bounds(truck_profile)
+    # One lamp of the light ahead as it came nearer: (metres to its line,
+    # x, y), for where it goes out of view (stop_short_from_sightings).
+    lamp_sightings: list[tuple[float, float, float]] = []
     # The painted lane bounding the line where the map's leaves it
     # (core.control.lane_guard); its black box written once per keeping.
     lane_guard = LaneGuard(truck=-cruise.camera.seat_right_m) if cruise is not None else LaneGuard()
@@ -1814,9 +2037,12 @@ def main() -> int:
     commander = Commander(recorder=recorder)
     try:
         recorder.open()
+        messages_file, logs = keep_messages(output, {"stdout": sys.stdout, "stderr": sys.stderr})
+        sys.stdout, sys.stderr = logs["stdout"], logs["stderr"]
         commander.open()
     except (OSError, PalError) as exc:
         print(f"cannot start: {exc}", file=sys.stderr)
+        stop_keeping(messages_file)
         recorder.close()
         reader.close()
         return 1
@@ -1865,7 +2091,10 @@ def main() -> int:
         )
         print(f"following {how} to {where}")
 
-    lateral = PurePursuit(truck.geometry(first), lookahead_time=args.lookahead)
+    # The truck's own: `geometry` further on is the trailer's, and a turn's
+    # cap read that one and stopped six drives in their first seconds.
+    truck_geometry = truck.geometry(first)
+    lateral = PurePursuit(truck_geometry, lookahead_time=args.lookahead)
     steering = SteeringPositionController()
 
     def keep_lane(block) -> float:
@@ -1889,6 +2118,17 @@ def main() -> int:
 
     speed_controller = SpeedController(truck.longitudinal())
     parking = ParkingBrake()
+    # The retarder, for slowing down more than coasting does and less than
+    # the brake's floor (core.control.retarder).
+    retarder_estimate = RetarderEstimate()
+    # The brake's own strength, learned (core.control.longitudinal).
+    brake_estimate = BrakeEstimate()
+    retarder_lever = RetarderLever()
+    # Round a tight turn wide while its mouth is clear (core.control.turn_line).
+    turn_line = WideTurnChoice()
+    turn_line_said: str | None = None
+    out_of_cab_said = False
+    wide_turns: list = []
     stop_latch = StopLatch()
     moving_off_since: float | None = None
     guard = SafetyMonitor(
@@ -1913,11 +2153,16 @@ def main() -> int:
     last_write_count = -1
     sent_brake: float | None = None
     """The brake last sent; at the start, the game's own (the driver's foot)."""
-    sent_pedals: tuple[float, float] | None = None
+    # The pedals sent lately: what the game may still show as the stack's
+    # (core.control.override.RecentPedals).
+    recent_pedals = RecentPedals()
     """(throttle, brake) last sent, to tell the driver's feet by."""
     feet = OverrideDetector(pedal_tolerance=PEDAL_TAKEOVER, dwell=PEDAL_TAKEOVER_S)
     health = HealthSampler().start()
     previous = started = time.perf_counter()
+    for log in (sys.stdout, sys.stderr):
+        if isinstance(log, MessageLog):
+            log.origin = started  # stamped as the events and logs are
     last_print = 0.0
     worst_error = 0.0
     last_error = 0.0
@@ -1947,7 +2192,7 @@ def main() -> int:
 
             if snapshot.is_paused:
                 commander.send(ControlCommand(), engaged=False)
-                sent_pedals = None
+                recent_pedals.clear()
                 speed_controller.reset()
                 previous = time.perf_counter()
                 if not paused_reported:
@@ -1977,10 +2222,11 @@ def main() -> int:
             # Luxembourg the driver braked, and the truck pressed full
             # throttle against the brake until it gave up. Not judged across
             # a stalled turn, while the plugin held the throttle off.
-            if sent_pedals is not None and dt < PEDAL_TAKEOVER_MAX_DT:
+            lately = recent_pedals.most()
+            if lately is not None and dt < PEDAL_TAKEOVER_MAX_DT:
                 foot = feet.update_pedals(
-                    commanded_throttle=sent_pedals[0],
-                    commanded_brake=sent_pedals[1],
+                    commanded_throttle=lately[0],
+                    commanded_brake=lately[1],
                     input_throttle=float(truck["input_throttle"]),
                     input_brake=float(truck["input_brake"]),
                     dt=dt,
@@ -2005,6 +2251,33 @@ def main() -> int:
                 if int(job["job_active"]) and int(job["cargo_loaded"])
                 else 0.0,
             )
+            retarder_level = int(truck["retarder_level"])
+            speed_controller.actuators.retarder_steps = (
+                int(truck["retarder_step_count"]) if retarder_lever.works else 0
+            )
+            retarder_estimate.observe(
+                level=retarder_level,
+                throttle=float(truck["effective_throttle"]),
+                brake=float(truck["effective_brake"]),
+                acceleration=convert.forward_acceleration(block),
+                grade=convert.grade_acceleration(block),
+                speed=speed,
+                coast_deceleration=speed_controller.actuators.calibration.coast_deceleration,
+                mass_ratio=speed_controller.actuators.mass_ratio,
+                dt=max(dt, 0.0),
+            )
+            speed_controller.actuators.retarder_per_step = retarder_estimate.per_step
+            brake_estimate.observe(
+                brake=float(truck["effective_brake"]),
+                throttle=float(truck["effective_throttle"]),
+                acceleration=convert.forward_acceleration(block),
+                grade=convert.grade_acceleration(block),
+                speed=speed,
+                calibration=speed_controller.actuators.calibration,
+                dt=max(dt, 0.0),
+            )
+            if brake_estimate.seen_s >= BRAKE_TRUSTED_AFTER_S:
+                speed_controller.actuators.brake_ratio = brake_estimate.ratio
 
             clock.mark("reading the telemetry")
             if gps is not None:
@@ -2060,9 +2333,11 @@ def main() -> int:
                     # from the old one over a few metres, its lengths are the
                     # new path's within centimetres.
                     lights = TrafficLights(marks.lights)
+                    service_stop = marks.service_stop
                     lights.carry_over(previous_lights)
                     barriers = marks.barriers
                     taught_spans = marks.taught_spans
+                    wide_turns = marks.wide_turns
                     if gate is not None:
                         gate = LaneChangeGate(marks.changes, gate.camera, path)
                         # A change begun behind the truck, still in its lane:
@@ -2095,6 +2370,21 @@ def main() -> int:
                     gps.error = None
 
             clock.mark("the GPS")
+            wide_shift = turn_line.shift(
+                spans=wide_turns,
+                progress=progress,
+                mouth_clear=cruise.mouth_clear if cruise is not None else None,
+                dt=dt,
+            )
+            if turn_line.chosen is not None and turn_line.chosen != turn_line_said:
+                turn_line_said = turn_line.chosen
+                print(
+                    "\n[a tight turn: round wide, its mouth clear]"
+                    if turn_line.chosen == "wide"
+                    else "\n[a tight turn: kept in, its mouth not seen clear]"
+                )
+            elif turn_line.chosen is None:
+                turn_line_said = None
             lateral_command = lateral.step(
                 x=x,
                 z=z,
@@ -2103,6 +2393,7 @@ def main() -> int:
                 path=path,
                 progress=progress,
                 aim_shift=lane_guard.shift,
+                aim_shift_at=wide_shift,
             )
             if (
                 abs(lateral_command.lateral_error) > PLACE_LOST_M
@@ -2124,6 +2415,7 @@ def main() -> int:
                     path=path,
                     progress=found.s,
                     aim_shift=lane_guard.shift,
+                    aim_shift_at=wide_shift,
                 )
             last_error = lateral_command.lateral_error
             progress = lateral_command.progress
@@ -2149,8 +2441,14 @@ def main() -> int:
             # The truck itself at the end, come to rest there
             # (core.control.end_stop): a depot's gate, a port.
             remaining = path.length - lateral_command.progress
+            short_of_gate = (
+                None if service_stop is None else service_stop - lateral_command.progress
+            )
+            if short_of_gate is not None:
+                remaining = min(remaining, short_of_gate)
             if (
                 gps is not None
+                and short_of_gate is None
                 and replan_asked is not path
                 and remaining < REPLAN_LEFT_M
                 and float(block["navigation"]["distance"]) / max(game_scale, 1.0)
@@ -2167,7 +2465,11 @@ def main() -> int:
                 if to_go is not None:
                     remaining = min(remaining, to_go)
             if reached(remaining, speed):
-                print("\n\nreached the end of the route")
+                if short_of_gate is not None and short_of_gate <= remaining + 1.0:
+                    print("\n\nat the turn onto the depot's own road: the rest is the driver's")
+                    ending = ("service_road", "")
+                else:
+                    print("\n\nreached the end of the route")
                 break
 
             # The ceiling is a wish; the corner in front decides.
@@ -2195,12 +2497,27 @@ def main() -> int:
                         course=convert.course_rad(block),
                         speed=speed,
                     )
+                    out_of_cab_said = False
                 except OutOfCab:
-                    # What the cab check saw, kept: near Rostock it stopped a
-                    # drive with the camera in the cab, the telemetry's head
-                    # unmoved, and no frame of it kept to say why.
-                    perception.snapshot(f"out-of-cab-{now - started:07.1f}")
-                    raise
+                    # A look about, or the camera nudged: slowed for, gently,
+                    # the lane kept by the map, and gone on from once it is
+                    # back. Stopped at once, the truck was braked at 6 m/s^2
+                    # from 59 km/h on a motorway's slip road for a moment's
+                    # look aside (18 November). Out for good, the drive ends.
+                    out_for = getattr(cruise, "out_of_cab_s", 0.0)
+                    if not out_of_cab_said:
+                        out_of_cab_said = True
+                        # What the cab check saw, kept: near Rostock it
+                        # stopped a drive with the camera in the cab, the
+                        # telemetry's head unmoved, and no frame of it kept.
+                        perception.snapshot(f"out-of-cab-{now - started:07.1f}")
+                        print(
+                            "\n[the game's camera is not in the cab: slowing; back to the cab"
+                            f" view within {OUT_OF_CAB_GIVE_UP_S:.0f} s, or the drive stops]"
+                        )
+                    if out_for >= OUT_OF_CAB_GIVE_UP_S:
+                        raise
+                    following = None
                 except PerceptionLost:
                     if not late_but_not_lost(report, now):
                         raise
@@ -2240,13 +2557,50 @@ def main() -> int:
                         cruise.green_since = None
                     elif cruise.green_since is None:
                         cruise.green_since = report.grabbed_at
+                next_light = lights.next_line(lateral_command.progress)
+                if (
+                    next_light is not None
+                    and camera is not None
+                    and light_filter.state in (LightState.RED, LightState.AMBER)
+                    and next_light.s - lateral_command.progress <= LIGHT_STOP_FROM_M
+                ):
+                    points = [
+                        (lamp.x, lamp.y)
+                        for lamp in report.lamps
+                        if lamp.colour is light_filter.state
+                    ]
+                    if points:
+                        to_line = next_light.s - lateral_command.progress
+                        before = STOP_SHORT_M
+                        if light_stop_at != next_light.s:
+                            lamp_sightings = []
+                        else:
+                            before = light_stop
+                        lamp_sightings = follow_lamp(lamp_sightings, to_line, points)
+                        light_stop_at = next_light.s
+                        wanted = stop_short_to_see(
+                            to_line, points, camera, eye_ahead_m(block), light_view
+                        )
+                        measured = stop_short_from_sightings(
+                            lamp_sightings, (camera.centre_col, camera.horizon_row), light_view
+                        )
+                        if measured is not None:
+                            wanted = max(wanted, measured)
+                        light_stop = moved_stop(before, wanted, to_line, speed)
+            next_light = lights.next_line(lateral_command.progress)
             light = lights.step(
                 progress=lateral_command.progress,
                 speed=speed,
                 state=light_filter.state,
+                lamp=report.light if report is not None else None,
                 minute_of_day=float(block["common"]["game_time"]) % 1440,
                 now=now,
                 traffic_going=cruise is not None and cruise.traffic_going,
+                stop_short=(
+                    light_stop
+                    if next_light is not None and next_light.s == light_stop_at
+                    else STOP_SHORT_M
+                ),
             )
             waiting_at_light = light.target_speed == 0.0 and abs(speed) < 0.3
             if not waiting_at_light:
@@ -2296,6 +2650,7 @@ def main() -> int:
                     now=now,
                     mirror=getattr(report, "mirror", None),
                     mirror_far=getattr(report, "mirror_far", None),
+                    night=not is_daylight(float(block["common"]["game_time"])),
                 )
                 if crossing_over.target_speed is not None:
                     planned_speed = min(planned_speed, crossing_over.target_speed)
@@ -2331,6 +2686,10 @@ def main() -> int:
                     planned_speed,
                     held_profile[1].speed_at(lateral_command.progress - held_profile[0]),
                 )
+            turning = turning_cap(truck_geometry, float(truck["effective_steering"]))
+            if turning is not None:
+                # Not faster while the wheel is turned; never braked for.
+                planned_speed = min(planned_speed, max(turning, speed))
             if light.urgent_deceleration is not None:
                 urgent = max(urgent or 0.0, light.urgent_deceleration)
             if perception is not None:
@@ -2411,9 +2770,9 @@ def main() -> int:
             # before moving off; the service brake alone did not hold a
             # stopped truck on a slope (core.control.parking).
             parked = bool(int(truck["parking_brake"]))
-            want_parked = parking.should_hold(speed=speed, stopping=stopping, now=now) or (
-                parked and stopping
-            )
+            want_parked = parking.should_hold(
+                speed=speed, stopping=stopping, now=now, grade=convert.grade_acceleration(block)
+            ) or (parked and stopping)
             if parked and not stopping:
                 # Moving off: pull first, and let go of the parking brake
                 # only once the throttle has been on for a moment.
@@ -2457,6 +2816,9 @@ def main() -> int:
                         )
                         if indicators is not None
                         else frozenset()
+                    )
+                    | retarder_lever.buttons(
+                        wanted=longitudinal.retarder, level=retarder_level, now=now
                     ),
                 )
             )
@@ -2468,7 +2830,7 @@ def main() -> int:
                         f"{standing.took}]"
                     )
             sent_brake = longitudinal.brake
-            sent_pedals = (longitudinal.throttle, longitudinal.brake)
+            recent_pedals.add(now, longitudinal.throttle, longitudinal.brake)
 
             # The tractor's error is not the vehicle's error: the trailer
             # cuts inside every corner, and on this route it reached 2.2 m
@@ -2493,18 +2855,45 @@ def main() -> int:
             if snapshot.write_count != last_write_count:
                 last_write_count = snapshot.write_count
                 recorder.write_telemetry(snapshot)
-            if perception is not None and args.keep_frames > 0.0:
+            if perception is not None and (args.keep_frames > 0.0 or args.tap is not None):
                 # Views of the road for training on (the lane model): while
-                # moving only, on the drive's own timeline.
+                # moving only, on the drive's own timeline. For the ROS view,
+                # standing too, and only to it.
                 keeping = args.keep_frames if abs(speed) >= KEEP_FROM_MPS else 0.0
+                if args.tap is not None:
+                    keeping = min(keeping or ROS_VIEW_EVERY_S, ROS_VIEW_EVERY_S)
                 if keeping != kept_every:
                     perception.keep_frames(keeping)
                     kept_every = keeping
                 for view in perception.kept():
-                    recorder.write_encoded_frame(
-                        view.jpeg, view.timestamp, view.sequence, view.width, view.height
-                    )
+                    if (
+                        args.keep_frames > 0.0
+                        and abs(speed) >= KEEP_FROM_MPS
+                        and view.timestamp - recorded_at >= args.keep_frames * 0.99
+                    ):
+                        recorded_at = view.timestamp
+                        recorder.write_encoded_frame(
+                            view.jpeg, view.timestamp, view.sequence, view.width, view.height
+                        )
+                    if args.tap is not None:
+                        args.tap.image(now, view.jpeg, camera, view.width, view.height)
+            if args.tap is not None:
+                tell_ros(args.tap, now, block, path, driven, report, camera, following)
             if perception is not None:
+                learned = perception.cab_learned()
+                if learned is not None:
+                    truck_profile = truck_profile.with_cab(learned)
+                    save_profile(truck_profile)
+                    print(f"\n[the cab's dashboard of {truck_profile.truck}: learned]")
+                top = perception.view_learned()
+                if top is not None:
+                    truck_profile = truck_profile.with_view_top(top)
+                    save_profile(truck_profile)
+                    light_view = view_bounds(truck_profile)
+                    print(
+                        f"\n[the windscreen of {truck_profile.truck}: from row "
+                        f"{light_view.top:.0f}, learned]"
+                    )
                 for slow in perception.slow_turns():
                     print(f"\n[a slow turn of perception, {slow}]", file=sys.stderr)
 
@@ -2514,7 +2903,7 @@ def main() -> int:
                 brake=longitudinal.brake,
                 position=(x, z),
                 expect_forward=True,
-                applied=max(float(truck["effective_throttle"]), float(truck["effective_brake"])),
+                applied=pedals_taken(truck),
                 frame=snapshot.write_count,
             )
 
@@ -2567,9 +2956,28 @@ def main() -> int:
                 print("\nstopping failed:", file=sys.stderr)
                 traceback.print_exc()
         with contextlib.suppress(Exception):
+            # The driver is not handed a truck with the retarder on.
+            _retarder_off(commander, reader)
+        if brake_estimate.ratio is not None:
+            print(
+                f"brake: {brake_estimate.ratio:.2f} of the calibrated truck's, "
+                f"against {speed_controller.actuators.mass_ratio:.2f} for the load, "
+                f"seen {brake_estimate.seen_s:.0f} s"
+            )
+        if retarder_estimate.seen_s > 0.0:
+            print(
+                f"retarder: {retarder_estimate.per_step:.2f} m/s2 a step, "
+                f"seen at work {retarder_estimate.seen_s:.0f} s, "
+                f"{retarder_lever.presses} presses of the lever"
+            )
+        with contextlib.suppress(Exception):
             commander.disengage()
         commander.close()
         recorder.close()
+        if args.tap is not None:
+            args.tap.status(time.perf_counter(), f"stopped: {ending[0]}", ending[1])
+            time.sleep(0.1)
+            args.tap.feed.close()
         reader.close()
         if gps is not None:
             gps.stop()
@@ -2601,11 +3009,23 @@ def main() -> int:
     print(f"recording: {output}")
     if args.outcome is not None:
         write_outcome(args.outcome, *ending)
+    stop_keeping(messages_file)
     return outcome
 
 
+def stop_keeping(messages_file) -> None:
+    """The console's own streams back, and the drive's messages closed."""
+    for name in ("stdout", "stderr"):
+        log = getattr(sys, name)
+        if isinstance(log, MessageLog):
+            setattr(sys, name, log.stream)
+    if messages_file is not None:
+        messages_file.close()
+
+
 def write_outcome(path: Path, reason: str, detail: str = "") -> None:
-    """Why a drive ended, for tools/mission.py: `end_of_route`, `disengaged`,
+    """Why a drive ended, for tools/mission.py: `end_of_route`, `service_road`
+    (stopped before the turn onto a depot's own road), `disengaged`,
     `unsafe`, `interrupted`, `lost_game`, `duration`; or `not_started`."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"reason": reason, "detail": detail}), encoding="utf-8")
@@ -2707,9 +3127,20 @@ class PathMarks:
     tight_turns: list = dataclass_field(default_factory=list)
     """The tight turns along the path (`tight_turn_spans`)."""
 
+    wide_turns: list = dataclass_field(default_factory=list)
+    """The tight turns along the path to be gone round wide while their
+    mouth is clear (core.planning.tight_turns.wide_spans)."""
 
-def path_marks(route: Route, path: ReferencePath) -> PathMarks:
-    """What `route` has along `path`, as distances along it."""
+    service_stop: float | None = None
+    """Where along the path the truck stops short of its depot's gate, before
+    the turn onto the depot's own road (core.planning.route.service_road_stop);
+    None for a route that ends at the gate, or not at a depot."""
+
+
+def path_marks(route: Route, path: ReferencePath, depot=None, wides=None) -> PathMarks:
+    """What `route` has along `path`, as distances along it; `depot`, the
+    job's, if the route may end at its gate; `wides`, the wide lines of its
+    tight turns by their stretches' keys (`TurnShaping.wide`)."""
     barriers = marks_of(route, path)
     return PathMarks(
         lights=lines_on_path(route.stop_lines(), path),
@@ -2723,7 +3154,24 @@ def path_marks(route: Route, path: ReferencePath) -> PathMarks:
         prefabs=prefab_spans(route, path),
         crossings=crossing_spans(route, path),
         tight_turns=tight_turn_spans(route, path),
+        wide_turns=wide_spans(route, path, wides) if wides else [],
+        service_stop=service_stop_on(route, path, depot),
     )
+
+
+def service_stop_on(route: Route, path: ReferencePath, depot) -> float | None:
+    """Where along `path` to stop before the turn onto the depot's own road,
+    short of its gate; only for a route that ends at one of `depot`'s gates,
+    not one that ends a few kilometres on, wherever that is."""
+    if depot is None or not route.lanes:
+        return None
+    try:
+        if int(route.lanes[-1]) not in depot_goals(route.network, depot):
+            return None
+    except RouteError:
+        return None
+    at = service_road_stop(route.network, route.lanes)
+    return None if at is None else float(path.nearest(at[0], at[1]).s)
 
 
 #: The lane guard leaves the path alone from this far before a taught line.
@@ -2775,6 +3223,9 @@ class TurnShaping:
     def __init__(self, network: RoadNetwork) -> None:
         self.network = network
         self.lines: dict[tuple[int, ...], np.ndarray | None] = {}
+        self.wide: dict[tuple[int, ...], WideTurn] = {}
+        """Lines over the mouth of the road turned into, for turns whose
+        shaped line keeps off it, to be driven while it is clear."""
         self._jobs: queue.Queue = queue.Queue()
         self._done: queue.Queue = queue.Queue()
         self._route: Route | None = None
@@ -2838,6 +3289,20 @@ class TurnShaping:
                 except Exception:  # a turn not shaped is driven as it was
                     traceback.print_exc()
                     line = None
+                if line is not None:
+                    try:
+                        wide = wide_turn(
+                            self.network,
+                            stretch.approach,
+                            stretch.exit_,
+                            points[first : last + 1],
+                            stretch.junction,
+                        )
+                    except Exception:  # kept to the line kept in, as before
+                        traceback.print_exc()
+                        wide = None
+                    if wide is not None:
+                        self.wide[stretch.key] = wide
                 self.lines[stretch.key] = line
             self._done.put((route, stretch, line is not None))
 
@@ -3070,7 +3535,7 @@ def _gps_main(
         profile = SpeedProfile(path, max_lateral_acceleration=lateral, max_speed=max_speed)
         number += 1
         sent[number] = router.route
-        marks = path_marks(route, path)
+        marks = path_marks(route, path, getattr(router, "depot", None), dict(shaping.wide))
         results.put(("route", refused, number, route.lanes, route.steps, path, profile, marks))
         return path
 
@@ -3214,7 +3679,8 @@ def _brake_to_rest(
     deadline = time.perf_counter() + timeout
     with guard.suspend():
         while time.perf_counter() < deadline:
-            block = reader.read().block
+            block, waited = _read_braking(reader, commander)
+            deadline += waited
             if abs(float(block["truck"]["speed"])) < 0.15:
                 break
             steer = 0.0
@@ -3229,13 +3695,57 @@ def _brake_to_rest(
         parking = ParkingBrake()
         deadline = time.perf_counter() + 3.0
         while time.perf_counter() < deadline:
-            is_set = bool(int(reader.read().block["truck"]["parking_brake"]))
+            block, waited = _read_braking(reader, commander)
+            deadline += waited
+            is_set = bool(int(block["truck"]["parking_brake"]))
             press = parking.press(want_set=True, is_set=is_set, now=time.perf_counter())
             if is_set and not press:
                 break
             buttons = frozenset({Button.HANDBRAKE}) if press else frozenset()
             commander.send(ControlCommand(brake=0.45, buttons=buttons))
             time.sleep(LOOP_INTERVAL)
+
+
+GAME_BACK_WAIT_S = 600.0
+"""How long a truck the game has stopped showing is braked for, blind,
+waiting for it to come back (`_read_braking`)."""
+
+
+def _read_braking(reader: TelemetryReader, commander: Commander):
+    """The newest telemetry block, and the seconds waited for it: while the
+    game shows none -- its window put away, it stops; and goes on where it
+    was when it comes back -- the brake is kept on, so that the plugin has a
+    stack braking the truck the moment it does. Near Venlo (18 November) the
+    game stood still for a minute at 31 km/h short of a junction; the stack
+    gave up on it after a second, and the truck came back to nobody, and
+    crashed. Raises the reader's error once `GAME_BACK_WAIT_S` is up."""
+    began = time.perf_counter()
+    said = False
+    while True:
+        try:
+            return reader.read().block, time.perf_counter() - began
+        except StaleTelemetryError:
+            if time.perf_counter() - began > GAME_BACK_WAIT_S:
+                raise
+            if not said:
+                said = True
+                print("\n[the game shows nothing: braking until it is back]", file=sys.stderr)
+            commander.send(ControlCommand(brake=0.45))
+            time.sleep(LOOP_INTERVAL)
+
+
+def _retarder_off(commander: Commander, reader: TelemetryReader, timeout: float = 3.0) -> None:
+    """The retarder's lever back to off, a press at a time, pedals left alone."""
+    lever = RetarderLever()
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
+        level = int(reader.read().block["truck"]["retarder_level"])
+        now = time.perf_counter()
+        buttons = lever.buttons(wanted=0, level=level, now=now)
+        if level <= 0 and not buttons:
+            return
+        commander.send(ControlCommand(buttons=buttons))
+        time.sleep(LOOP_INTERVAL)
 
 
 def _hand_over(commander: Commander) -> None:

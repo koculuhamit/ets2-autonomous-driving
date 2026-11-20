@@ -331,6 +331,7 @@ class PurePursuit:
         path: ReferencePath,
         progress: float | None = None,
         aim_shift: float = 0.0,
+        aim_shift_at=None,
     ) -> LateralCommand:
         """Compute the steering command for one frame.
 
@@ -343,6 +344,9 @@ class PurePursuit:
             aim_shift: metres to the right of the path to aim, as a painted
                 lane bounds it (core.control.lane_guard); the errors stay
                 the path's own.
+            aim_shift_at: more metres to the right to aim, by distance along
+                the path at the aim (core.control.turn_line): a line beside
+                the path, followed without making it the path.
         """
         nearest = path.nearest(x, z, near=progress)
         lateral = path.lateral_error(x, z, nearest)
@@ -366,6 +370,8 @@ class PurePursuit:
             over = target_s - path.length
             aim_x += over * math.sin(aim.heading)
             aim_z += over * math.cos(aim.heading)
+        if aim_shift_at is not None:
+            aim_shift = aim_shift + aim_shift_at(min(target_s, path.length))
         if aim_shift:
             # Right of a heading h is (-cos h, sin h).
             aim_x -= aim_shift * math.cos(aim.heading)

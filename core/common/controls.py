@@ -63,6 +63,10 @@ class Button(enum.StrEnum):
     ENGINE_BRAKE_DOWN = "engine_brake_down"
     HAZARD = "hazard"
 
+    #: The retarder lever, a step at a time (core.control.retarder).
+    RETARDER_UP = "retarder_up"
+    RETARDER_DOWN = "retarder_down"
+
     #: The game's "activate" (Enter): held at a gas pump, it fills the tank.
     ACTIVATE = "activate"
 

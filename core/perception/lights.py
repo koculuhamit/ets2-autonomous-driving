@@ -358,7 +358,73 @@ def find_lamps(
             if daylight and colour is LightState.RED and _tinted(hsv, cx, cy, area):
                 continue
             lamps.append(Lamp(colour, x, y, area))
+    if heads is not None:
+        lamps.extend(_read_heads(image, heads, lamps, view, camera, nearest_m, lowest))
     return lamps
+
+
+HEAD_V_MIN: Final = 170
+HEAD_MIN_PX: Final = 5
+HEAD_OVER_NEXT: Final = 2.0
+HEAD_ROWS: Final = {
+    LightState.RED: (0.0, 0.45),
+    LightState.AMBER: (0.3, 0.7),
+    LightState.GREEN: (0.55, 1.0),
+}
+"""A detected signal head in which no lamp was found lamp by lamp is read
+whole (`_read_heads`): its lit pixels -- `HEAD_V_MIN` bright, `S_MIN`
+saturated -- of one colour, `HEAD_MIN_PX` or more and `HEAD_OVER_NEXT` times
+any other's, where that colour's lamp sits in a standing head (`HEAD_ROWS`,
+shares of its height from the top). From 40 to 60 m a lamp is a few pixels,
+broken in two by its lens, and lamp by lamp it was found in one view of
+five: at sunset near Venlo a red was confirmed 15 m short of its line, at
+48 km/h, and gone through (18 November). Read whole, the head showed red in
+every view from 3.8 s out."""
+
+
+def _read_heads(image, heads, found, view, camera, nearest_m, lowest) -> list[Lamp]:
+    """Lamps of the heads `heads` none of `found` is in, read head by head."""
+    height, width = image.shape[:2]
+    read: list[Lamp] = []
+    for box in heads:
+        left, top, right, bottom = (round(float(v)) for v in box)
+        left, top = max(left, 0), max(top, 0)
+        right, bottom = min(right, width - 1), min(bottom, height - 1)
+        tall = bottom - top
+        if tall < 4 or right - left < 2 or tall < 1.5 * (right - left):
+            continue  # not a standing head: where each colour sits is not known
+        if any(left <= lamp.x <= right and top <= lamp.y <= bottom for lamp in found):
+            continue
+        cx, cy = (left + right) / 2.0, (top + bottom) / 2.0
+        if cy > lowest or view.is_covered(cx, cy, width, height):
+            continue
+        if not _in_a_head(cx, cy, [box], camera, nearest_m):
+            continue
+        hsv = cv2.cvtColor(image[top : bottom + 1, left : right + 1], cv2.COLOR_BGR2HSV)
+        hue, saturation, value = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+        lit = (value >= HEAD_V_MIN) & (saturation >= S_MIN)
+        counts = {}
+        for colour, (low, high) in HUES.items():
+            family = (hue >= low) & (hue <= high) if low <= high else (hue >= low) | (hue <= high)
+            counts[colour] = np.argwhere(lit & family)
+        best = max(counts, key=lambda c: len(counts[c]))
+        points = counts[best]
+        others = max(len(counts[c]) for c in counts if c is not best)
+        if len(points) < HEAD_MIN_PX or len(points) < HEAD_OVER_NEXT * others:
+            continue
+        share = float(points[:, 0].mean()) / tall
+        low_share, high_share = HEAD_ROWS[best]
+        if not low_share <= share <= high_share:
+            continue
+        read.append(
+            Lamp(
+                best,
+                float(left + points[:, 1].mean()),
+                float(top + points[:, 0].mean()),
+                len(points),
+            )
+        )
+    return read
 
 
 def _disc_like(blob: NDArray[np.bool_], w: int, h: int) -> bool:

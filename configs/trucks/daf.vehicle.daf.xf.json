@@ -1,0 +1,13 @@
+{
+  "format": "ets2ad-truck-1",
+  "truck": "daf.vehicle.daf.xf",
+  "steering_map": null,
+  "brake_dead_zone": null,
+  "brake_curve": null,
+  "camera": null,
+  "cab_reference": "daf.vehicle.daf.xf.cab.npy",
+  "view": null,
+  "measured": {
+    "cab": "2026-11-18, learned from the first frames of a drive"
+  }
+}

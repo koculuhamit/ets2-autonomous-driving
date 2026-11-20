@@ -52,7 +52,15 @@ from core.map import Signal
 from core.perception.lights import HOLD_S, LightState
 from core.planning.route import StopLine
 
-__all__ = ["LightDecision", "LightLine", "TrafficLights", "lines_on_path"]
+__all__ = [
+    "LightDecision",
+    "LightLine",
+    "TrafficLights",
+    "ViewBounds",
+    "lines_on_path",
+    "stop_short_from_sightings",
+    "stop_short_to_see",
+]
 
 STOP_SHORT_M: Final = 10.0
 """Where to stop, before the line, measured from the truck's reference point.
@@ -83,6 +91,38 @@ for one that is not there or not lit: passed at `DARK_SPEED`, not stopped
 at. Every working light in the drives so far was seen from 50-110 m, by day
 and by night; the ones never seen were junctions the map gives a light and
 the road does not."""
+
+STOP_CREEP_MPS: Final = 3.0
+"""Short of a light it is stopping for, the truck is not sped up, but for a
+crawl to it from slower."""
+
+STOP_SHORT_MAX_M: Final = 20.0
+SEE_MARGIN_M: Final = 1.0
+"""A light's own stop (`stop_short_to_see`): where the last of its lamps
+seen goes out of view, this much before it, no nearer the
+line than `STOP_SHORT_M` and no further than `STOP_SHORT_MAX_M`. Stopped at
+9.2 m, the lamps last seen at 11.1 m, a DAF stood 20 s at a green it did not
+see (15 November), and the driver went; the timeout would have taken 45 s."""
+
+SEEN_NEAR_M: Final = 50.0
+"""A light whose colour was seen only further than this, and not since, is
+gone through as dark (`DARK_SPEED`) once `DARK_DECIDE_M` near, not stood at:
+near Duisburg one was taken for green once at 105 m and never seen again --
+no light stood there to be seen -- and the truck stood at its line until the
+driver drove on (the driver's word, 15 November). One seen nearer and lost
+is still stood at."""
+
+FRONT_AHEAD_M: Final = 3.0
+"""How far the truck's front is ahead of its reference point: over the
+front axle and its overhang. Committing to a light is about the front."""
+
+THROUGH_STANDING_S: Final = 1.0
+"""Committed to go through on green or amber and then stood this long short
+of the line -- held by something else -- the light counts again. At a turn
+across the oncoming lanes in Copenhagen a DAF crept at 1 m/s 8 m short of
+the line on green, was taken for on its way through, was held by the
+traffic crossing for 10 s, and went over the line on red at 11 km/h when
+the way cleared (15 November)."""
 
 PASSED_CLEAR_M: Final = 40.0
 """How far past a light's line its lamps may still be in view: across the
@@ -138,16 +178,29 @@ class TrafficLights:
 
     lines: Sequence[LightLine]
     _committed: set[float] = field(default_factory=set)
+    _going_through: set[float] = field(default_factory=set)
+    """Of the committed lines, those committed to on green or amber, on the
+    move: let go of again by standing short of the line (`THROUGH_STANDING_S`)."""
+    _through_standing_since: float | None = None
     _stopping: set[float] = field(default_factory=set)
     _waiting_since: float | None = None
     _red_since: float | None = None
     _watched_from: dict[float, float] = field(default_factory=dict)
     _saw_colour: set[float] = field(default_factory=set)
+    _seen_near: set[float] = field(default_factory=set)
+    """Lines whose colour was seen within `SEEN_NEAR_M`."""
+    _last_colour: dict[float, LightState] = field(default_factory=dict)
+    """The colour each line's light was last seen showing."""
     _dark: set[float] = field(default_factory=set)
     _unwatched: set[float] = field(default_factory=set)
     _shadowed: set[float] = field(default_factory=set)
     """Lines approached while the last light's colour stood (`_held_over`):
     a colour of theirs may have been taken for that light's."""
+    _lamp_in_shadow: set[float] = field(default_factory=set)
+    """Shadowed lines while some lamp was in view: only then can a colour
+    of theirs have been taken for the last light's. With none in view the
+    whole way, in Leipzig (16 November), a line 33 m after a green the map
+    has and the road does not was stopped at and waited 10 s at."""
     _with_the_traffic: set[float] = field(default_factory=set)
     """Lines gone through, out of view, as the traffic at them moved off."""
     """Lines the drive began within `DARK_DECIDE_M` of (`STARTED_AT_WAIT_S`)."""
@@ -180,8 +233,15 @@ class TrafficLights:
                 self._unwatched.add(line.s)
             if any(abs(line.s - s) <= tolerance for s in previous._shadowed):
                 self._shadowed.add(line.s)
+            if any(abs(line.s - s) <= tolerance for s in previous._lamp_in_shadow):
+                self._lamp_in_shadow.add(line.s)
             if any(abs(line.s - s) <= tolerance for s in previous._saw_colour):
                 self._saw_colour.add(line.s)
+            if any(abs(line.s - s) <= tolerance for s in previous._seen_near):
+                self._seen_near.add(line.s)
+            for s, colour in previous._last_colour.items():
+                if abs(line.s - s) <= tolerance:
+                    self._last_colour[line.s] = colour
         self._waiting_since = previous._waiting_since
         self._red_since = previous._red_since
         self._begun = previous._begun
@@ -217,9 +277,15 @@ class TrafficLights:
         minute_of_day: float,
         now: float = 0.0,
         traffic_going: bool = False,
+        stop_short: float = STOP_SHORT_M,
+        lamp: LightState | None = None,
     ) -> LightDecision:
         """What the next light means now. `traffic_going`: the vehicles
-        standing with the truck are moving off (core.control.acc)."""
+        standing with the truck are moving off (core.control.acc);
+        `stop_short`: how far before the line to stop (`stop_short_to_see`);
+        `lamp`: the colour in view this frame, unfiltered (`state` if not
+        given)."""
+        lamp = state if lamp is None else lamp
         line = self.next_line(progress)
         if not self._begun:
             self._begun = True
@@ -245,6 +311,17 @@ class TrafficLights:
         distance = line.s - progress
         if line.s in self._with_the_traffic:
             return LightDecision(DARK_SPEED, None, "light out of view: with the traffic", distance)
+        if line.s in self._going_through and distance > FRONT_AHEAD_M:
+            if max(speed, 0.0) >= STOPPED_MPS:
+                self._through_standing_since = None
+            elif self._through_standing_since is None:
+                self._through_standing_since = now
+            elif now - self._through_standing_since >= THROUGH_STANDING_S:
+                # Stood short of the line: not in the junction, and the
+                # light's colour now is the one to go by.
+                self._going_through.discard(line.s)
+                self._committed.discard(line.s)
+                self._through_standing_since = None
         if line.s in self._committed:
             return LightDecision(None, None, "going through", distance)
         if line.signal.asleep(minute_of_day):
@@ -256,10 +333,25 @@ class TrafficLights:
             # and found dark it was driven through on red at 20 km/h.
             self._watched_from[line.s] = distance
             self._shadowed.add(line.s)
+            if lamp is not LightState.UNKNOWN:
+                self._lamp_in_shadow.add(line.s)
         if state is not LightState.UNKNOWN:
             self._saw_colour.add(line.s)
+            self._last_colour[line.s] = state
+            if distance <= SEEN_NEAR_M:
+                self._seen_near.add(line.s)
+        elif (
+            line.s in self._saw_colour
+            and line.s not in self._seen_near
+            and self._last_colour.get(line.s) is LightState.GREEN
+            and line.s not in self._stopping
+            and distance <= DARK_DECIDE_M
+        ):
+            self._dark.add(line.s)  # seen only from afar: no light there to see
         elif not (
-            line.s in self._saw_colour or line.s in self._unwatched or line.s in self._shadowed
+            line.s in self._saw_colour
+            or line.s in self._unwatched
+            or (line.s in self._shadowed and line.s in self._lamp_in_shadow)
         ):
             # No colour seen of it yet: not slowed for. Every working light
             # was seen from 50-110 m; a red first seen nearer is stopped for
@@ -279,7 +371,7 @@ class TrafficLights:
         if line.s in self._dark and state is LightState.UNKNOWN:
             return LightDecision(DARK_SPEED, None, "no lamp seen: slowly through", distance)
 
-        room = distance - STOP_SHORT_M
+        room = distance - stop_short
         speed = max(speed, 0.0)
         at_stop = room <= AT_STOP_M and speed < STOPPED_MPS
         if state is LightState.RED and at_stop:
@@ -332,14 +424,19 @@ class TrafficLights:
             # light does next, the truck is on its way through. Not at rest:
             # held at a green by something else, it saw the light go red
             # again in the game, and must still stop for that.
-            if speed > MOVING_MPS and room <= committed_within + AT_STOP_M:
+            # Past its stop, creeping on short of the line, the front's room to
+            # the line is what counts, not the stop's (behind it, negative).
+            front_room = room if room > AT_STOP_M else distance - FRONT_AHEAD_M
+            if speed > MOVING_MPS and front_room <= committed_within + AT_STOP_M:
                 self._committed.add(line.s)
+                self._going_through.add(line.s)
                 return LightDecision(None, None, "green: going through", distance)
             return LightDecision(None, None, "green", distance)
 
         if line.s not in self._stopping:
             if state is LightState.AMBER and needed > AMBER_STOP_DECELERATION:
                 self._committed.add(line.s)
+                self._going_through.add(line.s)
                 return LightDecision(None, None, "amber, too close to stop", distance)
             if state is LightState.RED and needed > RED_STOP_DECELERATION and speed > 3.0:
                 self._committed.add(line.s)
@@ -349,7 +446,9 @@ class TrafficLights:
 
         if room <= AT_STOP_M:
             return LightDecision(0.0, None, f"stopped for {state.value}", distance)
-        target = math.sqrt(2.0 * STOP_DECELERATION * room)
+        # Not faster than now: coming to a red seen 65 m off at 34 km/h, the
+        # truck sped up to 38 towards it, and braked harder for it later.
+        target = min(math.sqrt(2.0 * STOP_DECELERATION * room), max(speed, STOP_CREEP_MPS))
         urgent = None
         if state is not LightState.UNKNOWN and needed > COMFORT_DECELERATION:
             urgent = min(needed, MAX_DECELERATION)
@@ -358,6 +457,112 @@ class TrafficLights:
 
 ON_PATH_M: Final = 3.0
 """A stop line further than this from the path is not on it."""
+
+
+@dataclass(frozen=True, slots=True)
+class ViewBounds:
+    """What of the frame shows the road, in pixels: the windscreen, less
+    what covers it -- the mirrors, the HUD (the truck's `CabView`)."""
+
+    left: float
+    top: float
+    right: float
+    bottom: float
+    covered: tuple[tuple[float, float, float, float], ...] = ()
+
+    def shows(self, x: float, y: float) -> bool:
+        if not (self.left <= x <= self.right and self.top <= y <= self.bottom):
+            return False
+        return not any(x0 <= x <= x1 and y0 <= y <= y1 for x0, y0, x1, y1 in self.covered)
+
+
+def stop_short_to_see(
+    distance: float,
+    lamps: Sequence[tuple[float, float]],
+    camera,
+    eye_ahead: float,
+    view: ViewBounds,
+) -> float:
+    """How far before a light's line to stop to keep a lamp of it in view.
+
+    `distance` is from the truck's reference point to the line, the lamps
+    taken to stand at it; `lamps` are the image points (x, y) of its lamps
+    seen now. Coming nearer, a lamp moves straight out from the point ahead
+    on the horizon, as far again for each halving of its distance: up behind
+    the roof, or out past the windscreen's side or into a mirror. The last
+    of them to go decides; stopped before it goes, a lamp stays in view. A
+    lamp across the junction, further than the line, moves out more slowly
+    than it is taken to, and stops the truck no further back than needed.
+    In Leipzig (16 November) a Volvo's near lamp went out of view, past the
+    roof's corner, 14.5 m short of the line; the top alone said 10 would do,
+    and the truck stood 16 s at a green it could not see."""
+    from_eye = distance - eye_ahead
+    above = [(x, y) for x, y in lamps if y < camera.horizon_row]
+    if not above or from_eye <= 1.0:
+        return STOP_SHORT_M
+    cx, cy = camera.centre_col, camera.horizon_row
+    last = math.inf
+    for x, y in above:
+        if not view.shows(x, y):
+            continue
+        z = from_eye
+        while z > 0.5:
+            k = from_eye / (z - 0.25)
+            if not view.shows(cx + (x - cx) * k, cy + (y - cy) * k):
+                break
+            z -= 0.25
+        last = min(last, z)
+    if not math.isfinite(last):
+        return STOP_SHORT_M
+    gone = last + eye_ahead
+    return float(min(max(STOP_SHORT_M, gone + SEE_MARGIN_M), STOP_SHORT_MAX_M))
+
+
+FIT_SIGHTINGS: Final = 6
+FIT_SPAN_M: Final = 6.0
+"""A lamp seen this many times over this many metres of the approach has
+its way out of view measured (`stop_short_from_sightings`)."""
+
+
+def stop_short_from_sightings(
+    sightings: Sequence[tuple[float, float, float]],
+    centre: tuple[float, float],
+    view: ViewBounds,
+) -> float | None:
+    """How far before a light's line to stop to keep one of its lamps in
+    view, from where that lamp was seen coming nearer: (metres to the line,
+    x, y) each time. None until seen enough (`FIT_SIGHTINGS`, `FIT_SPAN_M`).
+
+    The lamp's distance from the point ahead on the horizon, `centre`, grows
+    as one over its distance from the eye; how far the lamp stands from the
+    line and the eye from the truck's reference point are one more unknown,
+    fitted with it. Measured so, it needs no camera of the truck's own -- a
+    Volvo on the Actros's camera was told its near lamp would stay in view
+    to 10 m, and lost it at 14.5 (Leipzig, 16 November) -- and no knowing
+    where the light's pole stands."""
+    if len(sightings) < FIT_SIGHTINGS:
+        return None
+    seen = np.asarray(sightings, float)
+    d, x, y = seen[:, 0], seen[:, 1], seen[:, 2]
+    if d.max() - d.min() < FIT_SPAN_M:
+        return None
+    cx, cy = centre
+    r = np.hypot(x - cx, y - cy)
+    if np.any(r < 5.0):
+        return None
+    slope, intercept = np.polyfit(d, 1.0 / r, 1)
+    if slope <= 0.0:
+        return None
+    scale = 1.0 / slope
+    offset = -intercept * scale  # where the lamp would be infinitely far out
+    way = np.array([x[-1] - cx, y[-1] - cy]) / r[-1]
+    at = float(d[-1])
+    while at - 0.25 > offset + 0.5:
+        reach = scale / (at - 0.25 - offset)
+        if not view.shows(cx + way[0] * reach, cy + way[1] * reach):
+            break
+        at -= 0.25
+    return float(min(max(STOP_SHORT_M, at + SEE_MARGIN_M), STOP_SHORT_MAX_M))
 
 
 def lines_on_path(lines: Sequence[StopLine], path: ReferencePath) -> list[LightLine]:

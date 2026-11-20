@@ -526,3 +526,47 @@ def test_a_box_jumping_to_another_vehicle_in_the_mirror_is_not_one_coming_up() -
     for k, size in enumerate((0.033, 0.036, 0.035, 0.038, 0.094)):
         decision = _mirror_step(g, 150.0 + k, 0.25 * k, size)
     assert decision is not None and "coming up fast" not in decision.reason
+
+
+def test_at_night_a_change_that_can_wait_begins_as_late_as_it_can() -> None:
+    """Near Bern by night the mirror showed nothing of a lorry beside the
+    truck and the change began at once; by night it waits, at speed."""
+    from core.control.lane_change import NIGHT_LATE_M, NIGHT_LATE_S
+
+    g = fork_gate()
+    (change,) = g.changes
+    speed = 8.0  # the fork's 84 m of room: at motorway speed it begins at its start
+    night_from = max(change.start, change.last_start - max(NIGHT_LATE_M, NIGHT_LATE_S * speed))
+    assert night_from > change.start + 10.0, "the fork leaves room to wait"
+    waiting = g.step(
+        progress=change.start + 1.0,
+        speed=speed,
+        pose=(0.0, change.start + 1.0, 0.0),
+        tracks=(),
+        unseen=(),
+        now=0.0,
+        night=True,
+    )
+    assert waiting.target_speed is None, "keeps its speed"
+    assert "at night" in waiting.reason
+    assert waiting.path is not None and abs(x_at(waiting.path, change.start + 40.0)) < 0.05
+    begun = g.step(
+        progress=night_from + 1.0,
+        speed=speed,
+        pose=(0.0, night_from + 1.0, 0.0),
+        tracks=(),
+        unseen=(),
+        now=10.0,
+        night=True,
+    )
+    assert begun.path is not None and begun.reason == ""
+    (signal,) = g.signalled()
+    assert signal.start == pytest.approx(night_from + 1.0)
+
+
+def test_by_day_the_same_change_begins_at_its_start() -> None:
+    g = fork_gate()
+    (change,) = g.changes
+    assert step(g, change.start + 1.0).reason == ""
+    (signal,) = g.signalled()
+    assert signal.start == pytest.approx(change.start)

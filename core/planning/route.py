@@ -18,6 +18,7 @@ import heapq
 import json
 import math
 import weakref
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,6 +117,22 @@ WAYPOINT_RADIUS_M: Final = 30.0
 #: yard; the yard's own driveway is not on the network, and in Turin
 #: (transinet) the road was 31.7 m from the nearer gate.
 GATE_RADIUS_M: Final = 60.0
+
+#: A depot's own road, without the game's traffic, longer than this to the
+#: gate is the driver's (`service_road_stop`): in Kassel (kaarfor) the way to
+#: the gate the game's GPS took ran 170 m along such a road, lined with
+#: pallets the map does not have, and the truck's side caught them.
+SERVICE_ROAD_MAX_M: Final = 50.0
+
+#: How far short of the junction that turns onto such a road the truck
+#: stops: on the public road, before the turn. The truck hit the pallets in
+#: Kassel 10 m past the turn, so a stop further in came too late (the
+#: driver's word, 15 November: before the turn).
+SERVICE_STOP_BEFORE_M: Final = 3.0
+
+#: How many lanes on from the public road by a gate the yard's own lanes
+#: may begin, for the road to count as leading into them (`gate_lanes`).
+GATE_ENTRY_LANES: Final = 40
 
 #: What a metre of a hidden road costs, in metres. The game's GPS never uses
 #: roads its map does not show, and one of them, closed off by yellow
@@ -743,6 +760,7 @@ def plan(
     network: RoadNetwork,
     start: tuple[float, float, float],
     through: Sequence[tuple[float, float]],
+    last_goals: Sequence[int] | None = None,
 ) -> Route:
     """A route from a pose, through each position in turn, ending at the last.
 
@@ -750,6 +768,8 @@ def plan(
         start: `(x, z, course)` -- where the vehicle is and which way it is
             going, course in the `atan2(dx, dz)` frame.
         through: positions to pass, the last being the destination.
+        last_goals: the lanes that reach the destination, where they are
+            not simply those near it (`gate_lanes`).
 
     Raises:
         RouteError: the start or a waypoint is off the network, or a leg has
@@ -764,8 +784,11 @@ def plan(
 
     lanes = [match.lane]
     steps: list[str] = []
-    for x, z in through:
-        goals = [int(lane) for lane in network.lanes_near(x, z, WAYPOINT_RADIUS_M)]
+    for index, (x, z) in enumerate(through):
+        if last_goals is not None and index == len(through) - 1:
+            goals = [int(lane) for lane in last_goals]
+        else:
+            goals = [int(lane) for lane in network.lanes_near(x, z, WAYPOINT_RADIUS_M)]
         if not goals:
             raise RouteError(f"waypoint ({x:.0f}, {z:.0f}) is not on the network")
         leg = _shortest(network, lanes[-1], goals, (x, z))
@@ -795,8 +818,9 @@ def plan_to_depot(
     """
     routes = []
     for gate in depot.gates:
+        at, goals = gate_lanes(network, gate)
         try:
-            routes.append(plan(network, start, [*through, _onto_road(network, gate)]))
+            routes.append(plan(network, start, [*through, at], last_goals=goals))
         except RouteError:
             continue
     if not routes:
@@ -822,8 +846,7 @@ def reroute_from(
     """
     best: Route | None = None
     for gate in depot.gates:
-        x, z = _onto_road(network, gate)
-        goals = [int(lane) for lane in network.lanes_near(x, z, WAYPOINT_RADIUS_M)]
+        (x, z), goals = gate_lanes(network, gate)
         if not goals:
             continue
         goals = [goal for goal in goals if goal not in avoid]
@@ -924,6 +947,78 @@ def rejoin(
         (*lanes, *way[1:], *route.lanes[index + 1 :]),
         (*steps, *kinds, *route.steps[index:]),
     )
+
+
+def gate_lanes(
+    network: RoadNetwork, gate: tuple[float, float]
+) -> tuple[tuple[float, float], list[int]]:
+    """Where to aim for a depot's gate, and the lanes that arrive there.
+
+    The lanes near the gate, but not the public road's when the yard's own
+    lanes are there too and the road leads into them: in Kassel (kaarfor) a
+    road with traffic passes 28 m from a gate, and a route that ended on it
+    stopped the truck there with its hazard lights on, in the traffic, a
+    kilometre from the gate the game's GPS went to. Where the yard's lanes
+    are an island the road does not reach, the road's lanes are kept: a
+    route has to end somewhere it can get to.
+    """
+    x, z = _onto_road(network, gate)
+    lanes = [int(lane) for lane in network.lanes_near(x, z, WAYPOINT_RADIUS_M)]
+    public = [lane for lane in lanes if network.lane_ai[lane]]
+    own = [lane for lane in lanes if not network.lane_ai[lane]]
+    if public and own and _leads_into(network, public, own):
+        return (x, z), own
+    return (x, z), lanes
+
+
+def service_road_stop(network: RoadNetwork, lanes: Sequence[int]) -> tuple[float, float] | None:
+    """Where a route to a depot stops short of its gate, as (x, z): when its
+    last `SERVICE_ROAD_MAX_M` or more run on lanes without the game's
+    traffic -- a depot's own road -- on the public road before the junction
+    that turns onto it, `SERVICE_STOP_BEFORE_M` short of the junction. None
+    when the route ends on the public road or near it, or has no public
+    road before the junction to stop on."""
+    run = 0.0
+    first = len(lanes)
+    for index in range(len(lanes) - 1, -1, -1):
+        lane = int(lanes[index])
+        if network.lane_ai[lane]:
+            break
+        run += float(network.lane_length[lane])
+        first = index
+    if first == 0 or run <= SERVICE_ROAD_MAX_M:
+        # All of it the depot's -- begun in the yard -- or short enough.
+        return None
+    # Back over the junction the turn is made in, to the road before it.
+    before = first - 1
+    while before >= 0 and network.lane(int(lanes[before])).source != "road":
+        before -= 1
+    if before < 0:
+        return None
+    points = np.asarray(network.lane_points(int(lanes[before])), dtype=float)[:, [0, 2]]
+    s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(points, axis=0).T))])
+    at = max(float(s[-1]) - SERVICE_STOP_BEFORE_M, 0.0)
+    return (float(np.interp(at, s, points[:, 0])), float(np.interp(at, s, points[:, 1])))
+
+
+def _leads_into(network: RoadNetwork, starts: list[int], targets: list[int]) -> bool:
+    """Whether any of `targets` is within `GATE_ENTRY_LANES` lanes on from
+    any of `starts`."""
+    wanted = set(targets)
+    seen = set(starts)
+    queue = deque((lane, 0) for lane in starts)
+    while queue:
+        lane, depth = queue.popleft()
+        if lane in wanted:
+            return True
+        if depth >= GATE_ENTRY_LANES:
+            continue
+        for following in network.next_lanes(lane):
+            following = int(following)
+            if following not in seen:
+                seen.add(following)
+                queue.append((following, depth + 1))
+    return False
 
 
 def _onto_road(network: RoadNetwork, gate: tuple[float, float]) -> tuple[float, float]:

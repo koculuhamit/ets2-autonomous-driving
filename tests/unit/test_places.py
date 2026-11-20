@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.map import CompanyPlace, Places, Sector
-from core.planning.route import RouteError, plan_to_depot
+from core.planning.route import RouteError, gate_lanes, plan_to_depot, reroute_from
 from tests.unit.lane_networks import network, polyline
 
 
@@ -127,3 +127,36 @@ def test_a_gate_set_back_from_the_road_is_reached_by_the_road_nearest_it() -> No
     assert plan_to_depot(net, (0.0, 10.0, 0.0), depot_at((45.0, 150.0))).lanes == (0,)
     with pytest.raises(RouteError):
         plan_to_depot(net, (0.0, 10.0, 0.0), depot_at((75.0, 150.0)))
+
+
+def test_a_route_ends_in_the_yard_s_lanes_not_on_the_road_passing_its_gate() -> None:
+    """In Kassel (kaarfor) a road with traffic passes 28 m from a gate; the
+    route ended on it and the truck stopped there, hazards on, in the traffic.
+    Here the road runs on past the gate, and a driveway leaves it for the yard."""
+    road = polyline((0, 0), (0, 100))
+    road_on = polyline((0, 100), (0, 300))
+    driveway = polyline((0, 100), (20, 110))
+    net = network([road, road_on, driveway], successors=[(0, 1), (0, 2)], public=(0, 1))
+    gate = (20.0, 112.0)
+
+    _, goals = gate_lanes(net, gate)
+    assert goals == [2], "the road's lanes are near the gate too, but not goals"
+    route = plan_to_depot(net, (0.0, 10.0, 0.0), depot_at(gate))
+    assert route.lanes == (0, 2)
+    assert reroute_from(net, [0], [], depot_at(gate)).lanes == (0, 2)
+
+
+def test_a_yard_the_road_does_not_lead_into_is_reached_from_the_road() -> None:
+    """The yard's lanes by the gate are an island: the road's lanes stay the
+    goals, as before, or the gate could not be reached at all."""
+    road = polyline((0, 0), (0, 200))
+    island = polyline((15, 100), (25, 110))
+    net = network([road, island], public=(0,))
+    _, goals = gate_lanes(net, (12.0, 104.0))
+    assert sorted(goals) == [0, 1]
+    assert plan_to_depot(net, (0.0, 10.0, 0.0), depot_at((12.0, 104.0))).lanes == (0,)
+
+
+def test_a_gate_with_only_the_road_by_it_keeps_the_road() -> None:
+    net = network([polyline((0, 0), (0, 200))], public=(0,))
+    assert gate_lanes(net, (10.0, 150.0))[1] == [0]
