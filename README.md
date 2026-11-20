@@ -41,8 +41,9 @@ over. Nothing is drawn over the game, and the game's UI is never automated.
 
 ## Status
 
-Release 2.1.2 is 2.1.0 with the fixes found after it, on Linux and on
-Windows; see its [release notes](docs/release-notes-2.1.2.md).
+Release 2.1.3 is 2.1.0 with the fixes found after it, on Linux and on
+Windows, and an uninstaller; see the release notes of
+[2.1.2](docs/release-notes-2.1.2.md) and [2.1.3](docs/release-notes-2.1.3.md).
 
 Release 2.1.0, driven on Ubuntu 22.04: three deliveries in a row went
 through without a fault to fix, to Düsseldorf, Salzburg and Linz. Since

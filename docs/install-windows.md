@@ -95,3 +95,24 @@ stops near it.
 - A border, toll or junction it drives badly: drive it by hand once while
   `tools/record.py` records, then teach it with `tools/teach_crossing.py`
   (see its help). Taught places are in `configs/crossings.json`.
+
+## Uninstall
+
+Close the game and double-click `uninstall.bat` in the folder you unzipped.
+It asks about each of these in turn, and keeps whatever you do not answer
+`y` to:
+
+| | where | size |
+|---|---|---|
+| the plugin | `<game>\bin\win_x64\plugins\ets2ad_telemetry.dll` | small; the game stops warning about SDK features |
+| uv's downloads of this project's packages | `%LOCALAPPDATA%\uv\cache` | about 2.5 GB with the GPU build |
+| the Python uv fetched | `%APPDATA%\uv\python` | about 100 MB |
+| uv | `%USERPROFILE%\.local\bin` | about 50 MB |
+| this folder | where you unzipped it | its packages, the map, and the drives recorded in it |
+
+Python and uv may be used by other projects of yours: say no to them if
+so. On the same disk uv links its downloads into the folder's packages, so
+the two take their space once, and it comes back when both are gone.
+Python, uv and the folder are removed a few seconds after the last
+question. Last, unsubscribe from the barrier mod in Steam if you no longer
+want it.

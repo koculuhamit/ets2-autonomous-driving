@@ -50,3 +50,18 @@ def test_a_release_leaves_out_the_listed_paths_too(tmp_path: Path) -> None:
     listing.write_text("# kept out\nnotes.md\ndocs/drafts/\n", encoding="utf-8")
     assert left_out(listing) == (*SKIPPED, "notes.md", "docs/drafts/")
     assert left_out(tmp_path / "missing.txt") == SKIPPED, "a copy without the list"
+
+
+@pytest.mark.parametrize("remover", ["UNINSTALL_SH", "UNINSTALL_BAT"])
+def test_the_uninstaller_runs_on_the_folder_s_own_python_and_leaves_the_folder(
+    remover: str,
+) -> None:
+    """Run through `uv run`, uv itself would be in use while it is removed;
+    and a window still in the folder keeps the folder from being deleted."""
+    import scripts.package as package
+
+    text = getattr(package, remover)
+    assert "tools/uninstall.py" in text.replace("\\", "/")
+    assert ".venv" in text
+    last = text.rstrip().splitlines()
+    assert any(line.startswith(("cd /", 'cd /d "%TEMP%"')) for line in last[-3:])

@@ -74,6 +74,37 @@ uv run python tools/mission.py %CPU% %*
 """
 
 
+UNINSTALL_SH = """#!/usr/bin/env sh
+# Take off this machine what ets2ad.sh put on it, asking for each.
+cd "$(dirname "$0")" || exit 1
+export PATH="$HOME/.local/bin:$PATH"
+if [ -x .venv/bin/python ]; then
+    .venv/bin/python tools/uninstall.py "$@"
+elif command -v uv >/dev/null 2>&1; then
+    uv run --no-project python tools/uninstall.py "$@"
+else
+    echo "Nothing was installed beyond this folder: delete it to finish."
+fi
+# Out of the folder, so that it can be deleted.
+cd / || exit 0
+"""
+
+UNINSTALL_BAT = """@echo off
+rem Take off this machine what ets2ad.bat put on it, asking for each.
+cd /d "%~dp0"
+set "PATH=%USERPROFILE%\\.local\\bin;%PATH%"
+if exist ".venv\\Scripts\\python.exe" (
+    ".venv\\Scripts\\python.exe" tools\\uninstall.py %*
+) else (
+    where uv >nul 2>&1 && (uv run --no-project python tools\\uninstall.py %*) ^
+        || echo Nothing was installed beyond this folder: delete it to finish.
+)
+rem Out of the folder, so that it can be deleted, and the window kept to read.
+cd /d "%TEMP%"
+pause
+"""
+
+
 def host_rid() -> str:
     system = "win" if sys.platform == "win32" else "linux"
     machine = platform.machine().lower()
@@ -191,6 +222,9 @@ def main() -> int:
     launcher = release / ("ets2ad.bat" if windows else "ets2ad.sh")
     launcher.write_text(LAUNCH_BAT if windows else LAUNCH_SH, encoding="utf-8", newline="")
     launcher.chmod(0o755)
+    remover = release / ("uninstall.bat" if windows else "uninstall.sh")
+    remover.write_text(UNINSTALL_BAT if windows else UNINSTALL_SH, encoding="utf-8", newline="")
+    remover.chmod(0o755)
 
     archive = shutil.make_archive(str(args.output / name), "zip", args.output, name)
     size = Path(archive).stat().st_size / 1e6
