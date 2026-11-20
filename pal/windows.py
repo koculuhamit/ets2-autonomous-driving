@@ -360,13 +360,20 @@ class WindowsScreenCapture(ScreenCapture):
         where = self.geometry
         if not self.in_front:
             raise WindowNotInFrontError(f"{self._window_title!r} is not the foreground window")
+        if where.width <= 0 or where.height <= 0:
+            raise WindowNotInFrontError(f"{self._window_title!r} is minimised")
         region = {"left": where.x, "top": where.y, "width": where.width, "height": where.height}
         before = time.perf_counter()
         shot = self._grabber.grab(region)
         after = time.perf_counter()
         self._sequence += 1
+        # The picture's own size, not the one asked for: with the display
+        # scaled, a window's size and its grab's can differ, and a frame the
+        # size of neither cannot be made.
+        height = int(getattr(shot, "height", where.height))
+        width = int(getattr(shot, "width", where.width))
         return Frame(
-            image=bgra_to_bgr(shot.raw, where.height, where.width),
+            image=bgra_to_bgr(shot.raw, height, width),
             timestamp=(before + after) / 2.0,
             sequence=self._sequence,
         )

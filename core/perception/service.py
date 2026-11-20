@@ -173,6 +173,12 @@ STOP_WITHIN_S: Final = 5.0
 """How long the perception process is given to write its black box and stop."""
 
 
+READY_TIMEOUT_S: Final = 180.0
+"""How long the child may take to load its model. The first start of a new
+install on Windows loads CUDA's libraries from a fresh folder, which the
+virus scanner reads first: 60 s was not enough (20 November)."""
+
+
 class PerceptionService:
     """Starts the child, and hands the caller its newest report."""
 
@@ -223,7 +229,7 @@ class PerceptionService:
         """Where the child's model runs, as its detector reported it; empty
         for a detector that does not say."""
 
-    def start(self, ready_timeout: float = 60.0) -> None:
+    def start(self, ready_timeout: float = READY_TIMEOUT_S) -> None:
         """Start the child and wait until it has loaded its model."""
         receiver, sender = mp.Pipe(duplex=False)
         self._stop = mp.Event()
@@ -276,7 +282,14 @@ class PerceptionService:
             while self._draining.is_set():
                 if not receiver.poll(0.05):
                     continue
-                message = receiver.recv()
+                try:
+                    message = receiver.recv()
+                except (EOFError, OSError):
+                    raise
+                except Exception as exc:
+                    with self._lock:
+                        self.error = f"a report could not be read: {_said(exc)}"
+                    continue
                 with self._lock:
                     if isinstance(message, PerceptionReport):
                         self._latest = message
@@ -446,6 +459,15 @@ def _run(
                 )
                 time.sleep(interval)
                 continue
+            except Exception as exc:
+                # Any other failure to grab ended the child, said only to a
+                # pipe nobody read out: on Windows every beacon then stopped
+                # for "no view of the road: is the game in front?" with the
+                # game in front (20 November). It is a view not had, and why.
+                why = f"the game window could not be grabbed: {_said(exc)}"
+                sender.send(PerceptionReport(began, -1, (), 0.0, covered=True, covered_why=why))
+                time.sleep(max(interval, GRAB_RETRY_S))
+                continue
             marks = [("grab", time.perf_counter())]
             if black_box is not None:
                 black_box.add(frame.image, frame.timestamp)
@@ -575,7 +597,7 @@ def _run(
                 time.sleep(spare)
     except Exception as exc:
         with contextlib.suppress(Exception):
-            sender.send(f"{type(exc).__name__}: {exc}")
+            sender.send(_said(exc))
     finally:
         if black_box is not None:
             with contextlib.suppress(Exception):
@@ -583,6 +605,21 @@ def _run(
         with contextlib.suppress(Exception):
             capture.close()
         sender.close()
+
+
+GRAB_RETRY_S: Final = 0.5
+"""After a grab that failed for a reason other than another window in front,
+how long before the next try."""
+
+
+def _said(exc: BaseException) -> str:
+    """An exception as one line: its type, its word, and where in the code it
+    was raised -- the child's traceback does not reach the parent."""
+    import traceback
+
+    where = traceback.extract_tb(exc.__traceback__)[-1:] if exc.__traceback__ else []
+    at = f" ({Path(where[0].filename).name}:{where[0].lineno})" if where else ""
+    return f"{type(exc).__name__}: {exc}{at}"
 
 
 SLOW_PERCEPTION_S: Final = 0.4

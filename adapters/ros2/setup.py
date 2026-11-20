@@ -8,7 +8,7 @@ PACKAGE = "ets2ad_ros"
 
 setup(
     name=PACKAGE,
-    version="2.1.0",
+    version="2.1.2",
     packages=[PACKAGE],
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{PACKAGE}"]),

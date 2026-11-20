@@ -35,6 +35,22 @@ class Broken:
         raise OSError("no GPU here")
 
 
+class GrabFails(FakeScreenCapture):
+    """A capture that fails for a reason other than a window in front."""
+
+    def grab(self):
+        raise ValueError("8294400 bytes is not a 2400x1350 BGRA image")
+
+
+def failing_window() -> GrabFails:
+    return GrabFails(WindowGeometry(0, 0, 64, 48))
+
+
+class DetectorFails:
+    def detect(self, image):
+        raise IndexError("index 2000 is out of bounds")
+
+
 def small_window() -> FakeScreenCapture:
     return FakeScreenCapture(WindowGeometry(0, 0, 64, 48))
 
@@ -71,6 +87,27 @@ def test_a_covered_window_is_reported_not_hidden() -> None:
         report = wait_for(service, lambda r: True)
         assert report.covered and report.tracks == ()
         assert report.covered_why == "a browser is in front", "and why, as the capture said"
+
+
+def test_a_grab_that_fails_is_a_view_not_had_and_why_not_a_dead_child() -> None:
+    """On Windows a failed grab ended the child without a word reaching the
+    drive, and every beacon stopped for "is the game in front?"."""
+    with PerceptionService(failing_window, CarAhead, CAMERA, rate_hz=50.0) as service:
+        report = wait_for(service, lambda r: r.covered)
+        assert "could not be grabbed" in report.covered_why
+        assert "ValueError: 8294400 bytes" in report.covered_why
+        time.sleep(0.6)
+        assert service.alive, "it goes on trying"
+
+
+def test_a_child_that_fails_on_the_way_says_why_and_where() -> None:
+    with PerceptionService(small_window, DetectorFails, CAMERA, rate_hz=50.0) as service:
+        deadline = time.perf_counter() + 5.0
+        while service.error is None and time.perf_counter() < deadline:
+            time.sleep(0.02)
+        assert service.error is not None
+        assert service.error.startswith("IndexError: index 2000 is out of bounds")
+        assert "test_perception_service.py:" in service.error, "where it was raised"
 
 
 def test_a_child_that_cannot_start_says_why() -> None:

@@ -85,6 +85,11 @@ stops near it.
 
 - The truck does not move when the beacon is on: the launcher's window says
   why. "is the game in front?" means the game window was hidden or minimised.
+- It stops at once for "no view of the road", or perception does not start
+  in time, with the game in front: look at the GPU's load (Task Manager,
+  Performance). Near 100 %, the game leaves the detector no time. Cap the
+  frame rate at 60 FPS, or lower the graphics settings, until it is well
+  under.
 - The game says nothing about SDK features: the plugin is not installed. Run
   `ets2ad.bat` again with the game closed.
 - A border, toll or junction it drives badly: drive it by hand once while

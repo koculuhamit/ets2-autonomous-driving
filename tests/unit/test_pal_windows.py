@@ -140,6 +140,37 @@ def test_the_window_is_grabbed_where_it_is_and_only_in_front() -> None:
     assert not capture.is_open
 
 
+def test_the_picture_is_made_at_the_size_it_was_grabbed() -> None:
+    """With the display scaled, the grab and the window's size can differ."""
+    api = FakeApi()
+
+    class Shot:
+        width, height = 8, 6
+        raw = bytes(8 * 6 * 4)
+
+    class Grabber:
+        def grab(self, region):
+            return Shot()
+
+    with WindowsScreenCapture("Euro Truck Simulator 2", api=api, grabber=Grabber()) as capture:
+        assert capture.grab().image.shape == (6, 8, 3)
+
+
+def test_a_minimised_window_is_not_in_front() -> None:
+    api = FakeApi()
+    api.area = (100, 50, 0, 0)
+
+    class Grabber:
+        def grab(self, region):
+            raise AssertionError("not grabbed")
+
+    with (
+        WindowsScreenCapture("Euro Truck Simulator 2", api=api, grabber=Grabber()) as capture,
+        pytest.raises(WindowNotInFrontError, match="minimised"),
+    ):
+        capture.grab()
+
+
 def test_no_game_window_is_not_found() -> None:
     capture = WindowsScreenCapture("Something Else", api=FakeApi(), grabber=object())
     with pytest.raises(WindowNotFoundError):

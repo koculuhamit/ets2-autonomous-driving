@@ -179,8 +179,29 @@ def test_no_view_says_what_the_capture_said() -> None:
 
     off = SimpleNamespace(covered_why="the game window reaches past the screen")
     assert no_view(service(off)) == "no view of the road: the game window reaches past the screen"
-    assert no_view(service(None)).endswith("is the game in front?")
     assert no_view(service(SimpleNamespace(covered_why=""))).endswith("is the game in front?")
+
+
+def test_no_view_says_the_perception_child_failed_and_why() -> None:
+    """On Windows a failed child was asked "is the game in front?" four
+    times, its own word never shown (20 November)."""
+    import time
+    from types import SimpleNamespace
+
+    from tools.follow import no_view
+
+    failed = SimpleNamespace(error="ValueError: bad frame (windows.py:380)", alive=False)
+    failed.latest = lambda: None
+    assert no_view(failed) == (
+        "no view of the road: perception failed: ValueError: bad frame (windows.py:380)"
+    )
+    silent = SimpleNamespace(error=None, alive=False, latest=lambda: None)
+    assert no_view(silent) == "no view of the road: perception stopped without a word"
+    waiting = SimpleNamespace(error=None, alive=True, latest=lambda: None)
+    assert no_view(waiting) == "no view of the road: no picture of the game window yet"
+    old = SimpleNamespace(covered_why="", grabbed_at=time.perf_counter() - 4.0)
+    stale = SimpleNamespace(error=None, alive=True, latest=lambda: old)
+    assert "the last picture of the game is 4." in no_view(stale)
 
 
 def test_a_truck_loaded_after_the_standby_began_gets_perception_for_it(

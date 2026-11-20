@@ -442,11 +442,30 @@ def uncalibrated(truck: TruckProfile) -> str:
 def no_view(service) -> str:
     """What to say for no view of the road: the capture's word where it had
     one -- the game window off the screen, another window in front of it --
-    or the question to ask. With a 1920x1080 window run off a 1920x1080
-    screen the launcher asked "is the game in front?" of a game in front."""
+    the perception child's own failure, or the question to ask. With a
+    1920x1080 window run off a 1920x1080 screen the launcher asked "is the
+    game in front?" of a game in front; on Windows a child that had failed
+    was asked it too, four times (20 November)."""
+    error = getattr(service, "error", None)
+    if error:
+        return f"no view of the road: perception failed: {error}"
+    if getattr(service, "alive", True) is False:
+        return "no view of the road: perception stopped without a word"
     report = service.latest()
-    why = getattr(report, "covered_why", "") if report is not None else ""
-    return f"no view of the road: {why}" if why else "no view of the road: is the game in front?"
+    if report is None:
+        return "no view of the road: no picture of the game window yet"
+    why = getattr(report, "covered_why", "")
+    if why:
+        return f"no view of the road: {why}"
+    grabbed = getattr(report, "grabbed_at", None)
+    if grabbed is not None and time.perf_counter() - grabbed > STALE_VIEW_S:
+        age = time.perf_counter() - grabbed
+        return f"no view of the road: the last picture of the game is {age:.1f} s old"
+    return "no view of the road: is the game in front?"
+
+
+STALE_VIEW_S = 1.0
+"""A picture older than this is not a view of the road now."""
 
 
 def sees_the_road(service, since: float = -math.inf, within: float = 5.0) -> bool:
@@ -460,6 +479,12 @@ def sees_the_road(service, since: float = -math.inf, within: float = 5.0) -> boo
         time.sleep(0.02)
     return False
 
+
+NOT_RUNNING = (
+    'perception is not running yet: wait for "standby: ready" before the beacon '
+    "(the first start loads the detector for up to a few minutes)"
+)
+"""The beacon switched on before the perception child was ready."""
 
 STANDBY_RETRY_S = 10.0
 """Waiting for the beacon, how often to try again what could not be made ready."""
@@ -707,7 +732,7 @@ def standby_until_go(args) -> Standing | int:
         to_gps, folder = parts[1] == "gps", Path(parts[2])
         outcome = folder / "outcome.json"
         if perception is None:
-            write_outcome(outcome, "unsafe", "perception is not running: is the game in front?")
+            write_outcome(outcome, "unsafe", NOT_RUNNING)
             return give_up(1)
         perception.resume()
         route = folder.with_suffix(".npz")
