@@ -2,7 +2,11 @@
 
 [![CI](https://github.com/koculuhamit/ets2-autonomous-driving/actions/workflows/ci.yml/badge.svg)](https://github.com/koculuhamit/ets2-autonomous-driving/actions/workflows/ci.yml)
 
-https://github.com/user-attachments/assets/3c20630b-1242-488d-a430-745a257baeab
+
+
+https://github.com/user-attachments/assets/3ae98950-220b-4697-ba80-0c3b65493a71
+
+
 
 A delivery to Helsingborg on Linux, from the beacon switched on to the
 depot: 47 km of the game's in 7 minutes, no take-over, no hits. Parts are
