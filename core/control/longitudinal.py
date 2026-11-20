@@ -529,7 +529,7 @@ STILL_MPS: Final = 0.3
 
 
 def held_still(
-    command: LongitudinalCommand, speed: float, brake_down: bool = True
+    command: LongitudinalCommand, speed: float, brake_down: bool = True, reversed: bool = False
 ) -> LongitudinalCommand:
     """`command` as the game's automatic gearbox needs it at a standstill
     with no throttle: it puts a stopped truck into reverse for the brake
@@ -541,7 +541,14 @@ def held_still(
     stop, it was pressed again, and the truck rolled back. The brake up is
     left up: in Linz a drive begun at rest, the driver's foot off the brake,
     pressed it for one frame before pulling away, and the truck stood in
-    reverse with the throttle braking it."""
+    reverse with the throttle braking it.
+
+    `reversed`: the gearbox has gone into reverse at rest all the same --
+    near Linz within half a second of stopping on the brake held -- and the
+    brake now drives the truck back: let go of, the truck held on the
+    parking brake instead (tools/follow.py)."""
+    if reversed and command.throttle <= 0.0:
+        return LongitudinalCommand(0.0, 0.0, command.reason + " (in reverse: brake let go)")
     if abs(speed) >= STILL_MPS or command.throttle > 0.0:
         return command
     if not brake_down:

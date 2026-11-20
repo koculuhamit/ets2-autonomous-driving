@@ -1,0 +1,13 @@
+{
+  "format": "ets2ad-truck-1",
+  "truck": "man.vehicle.man.tgx",
+  "steering_map": null,
+  "brake_dead_zone": null,
+  "brake_curve": null,
+  "camera": null,
+  "cab_reference": "man.vehicle.man.tgx.cab.npy",
+  "view": null,
+  "measured": {
+    "cab": "2026-11-20, learned from the first frames of a drive"
+  }
+}

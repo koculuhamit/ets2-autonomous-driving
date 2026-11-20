@@ -536,3 +536,18 @@ def test_nothing_is_learned_of_the_brake_with_the_throttle_on_or_slow() -> None:
                 **frame,
             )
         assert estimate.ratio is None
+
+
+def test_in_reverse_at_rest_the_brake_is_let_go() -> None:
+    """Stopped at a red near Linz (20 November) on the brake held, the game
+    put the truck into reverse within half a second, and the brake -- its
+    pedal backing the truck in reverse -- drove it back."""
+    from core.control.longitudinal import HOLD_BRAKE, LongitudinalCommand, held_still
+
+    holding = LongitudinalCommand(0.0, HOLD_BRAKE, "stopping")
+    assert held_still(holding, 0.0, brake_down=True).brake == HOLD_BRAKE
+    let_go = held_still(holding, 0.0, brake_down=True, reversed=True)
+    assert (let_go.throttle, let_go.brake) == (0.0, 0.0)
+    # Pulling away, the throttle takes it out of reverse: left as it is.
+    pulling = LongitudinalCommand(0.4, 0.0, "accelerating")
+    assert held_still(pulling, 0.0, reversed=True).throttle == 0.4

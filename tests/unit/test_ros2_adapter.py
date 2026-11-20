@@ -291,3 +291,43 @@ def test_mission_passes_ros_on_to_each_drive() -> None:
     args = SimpleNamespace(duration=10, time_gap=1.5, keep_frames=0.0, allow_cpu=False, ros=True)
     assert "--ros" in drive_arguments(args)
     assert "--ros" not in drive_arguments(SimpleNamespace(**{**vars(args), "ros": False}))
+
+
+def test_the_route_is_drawn_at_the_road_s_heights_the_near_pass_where_it_crosses_itself() -> None:
+    """Drawn at the truck's own height all along, the route floated over the
+    lanes downhill and under them uphill, by up to 8.5 m 200 m on."""
+    from adapters.ros2.feed import heights_along
+
+    # Up a hill, round a loop, and over the road it came along, 8 m higher.
+    s = np.arange(0.0, 400.0, 2.0)
+    angle = np.clip((s - 100.0) / 200.0, 0.0, 1.0) * 2.0 * np.pi
+    x = np.where(s < 100.0, 0.0, 30.0 * np.sin(angle))
+    z = np.where(s < 100.0, s, 100.0 + 30.0 * (1.0 - np.cos(angle)) - (s >= 300.0) * (s - 300.0))
+    y = 0.04 * s
+    ground = np.column_stack([x, y, z])
+    path = ground[:, [0, 2]]
+    heights = heights_along(path, ground, 0, 0.0)
+    assert np.abs(heights - y).max() < 0.2
+    # Started from the upper pass, where the route goes over its own start.
+    upper = int(np.argmin(np.abs(s - 330.0)))
+    from_above = heights_along(path, ground, upper, y[upper])
+    assert abs(from_above[upper] - y[upper]) < 0.2
+
+
+def test_the_tap_sends_the_route_about_the_truck_at_the_road_s_heights() -> None:
+    from adapters.ros2.feed import ROUTE_AHEAD_M, Tap
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.sent = []
+
+        def send(self, message) -> None:
+            self.sent.append(message)
+
+    s = np.arange(0.0, 6000.0, 1.0)
+    ground = np.column_stack([np.zeros_like(s), 0.05 * s, s])
+    tap = Tap(Recorder())
+    tap.route(1.0, ground[:, [0, 2]], height=50.0, progress=1000.0, ground=ground)
+    points = np.asarray(tap.feed.sent[-1].fields["points"])
+    assert points[:, 2].max() <= 1000.0 + ROUTE_AHEAD_M + 1.0
+    assert np.abs(points[:, 1] - 0.05 * points[:, 2]).max() < 0.1

@@ -399,6 +399,18 @@ def eye_ahead_m(block) -> float:
     return max(ahead) if ahead else 0.0
 
 
+REVERSE_AT_REST_MPS = 1.0
+"""Slower than this, a truck in reverse it was not put into is at rest in
+it, there by the gearbox (`in_reverse`)."""
+
+
+def in_reverse(truck) -> bool:
+    """Whether the gearbox is in a reverse gear. Stopped at a red near Linz
+    (20 November) on the brake held, the game's automatic gearbox put the
+    truck into reverse within half a second, and the brake drove it back."""
+    return int(truck["gear"]) < 0 or int(truck["gear_displayed"]) < 0
+
+
 def pedals_taken(truck) -> float:
     """How much of a pedal the game has from the stack: the larger of what it
     applies and what its input reads. An electric DAF XF brakes with its
@@ -783,13 +795,16 @@ def ros_tap():
     return Tap(feed)
 
 
-def tell_ros(tap, now: float, block, path, driven, report, camera, following) -> None:
-    """One turn of the drive, told to the ROS 2 bridge."""
+def tell_ros(
+    tap, now: float, block, path, driven, report, camera, following, *, route=None, progress=None
+) -> None:
+    """One turn of the drive, told to the ROS 2 bridge: `route`, the one the
+    path was made from, gives the path its heights about `progress`."""
     tap.pose(now, block)
     position = block["truck"]["placement"]["position"]
     x, y, z = float(position["x"]), float(position["y"]), float(position["z"])
     if path is not None:
-        tap.route(now, path.points, height=y)
+        tap.route(now, path.points, height=y, progress=progress, ground=route)
     tap.lanes(now, getattr(driven, "network", None), x, z)
     if report is not None and camera is not None:
         lead = getattr(following, "lead_id", None) if following is not None else None
@@ -2770,9 +2785,19 @@ def main() -> int:
             # before moving off; the service brake alone did not hold a
             # stopped truck on a slope (core.control.parking).
             parked = bool(int(truck["parking_brake"]))
-            want_parked = parking.should_hold(
-                speed=speed, stopping=stopping, now=now, grade=convert.grade_acceleration(block)
-            ) or (parked and stopping)
+            # The gearbox gone into reverse at rest, on the brake held: let
+            # go of it at once and hold the truck on the parking brake.
+            reversed_at_rest = in_reverse(truck) and abs(speed) < REVERSE_AT_REST_MPS
+            want_parked = (
+                parking.should_hold(
+                    speed=speed,
+                    stopping=stopping,
+                    now=now,
+                    grade=convert.grade_acceleration(block),
+                )
+                or (parked and stopping)
+                or (reversed_at_rest and stopping)
+            )
             if parked and not stopping:
                 # Moving off: pull first, and let go of the parking brake
                 # only once the throttle has been on for a moment.
@@ -2789,7 +2814,9 @@ def main() -> int:
                 # reverse, for the game's gearbox.
                 if sent_brake is None:
                     sent_brake = float(truck["input_brake"])
-                longitudinal = held_still(longitudinal, speed, brake_down=sent_brake > 0.0)
+                longitudinal = held_still(
+                    longitudinal, speed, brake_down=sent_brake > 0.0, reversed=reversed_at_rest
+                )
             steer = steering.command(
                 target=lateral_command.steering,
                 measured=float(truck["effective_steering"]),
@@ -2878,7 +2905,18 @@ def main() -> int:
                     if args.tap is not None:
                         args.tap.image(now, view.jpeg, camera, view.width, view.height)
             if args.tap is not None:
-                tell_ros(args.tap, now, block, path, driven, report, camera, following)
+                tell_ros(
+                    args.tap,
+                    now,
+                    block,
+                    path,
+                    driven,
+                    report,
+                    camera,
+                    following,
+                    route=signalled,
+                    progress=lateral_command.progress,
+                )
             if perception is not None:
                 learned = perception.cab_learned()
                 if learned is not None:

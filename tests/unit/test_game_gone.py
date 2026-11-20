@@ -68,3 +68,15 @@ def test_a_game_gone_for_good_is_given_up_on(monkeypatch) -> None:
     monkeypatch.setattr(follow, "GAME_BACK_WAIT_S", 0.0)
     with pytest.raises(StaleTelemetryError):
         follow._brake_to_rest(_Commander(), _Gone(gone=10**6), _Guard())
+
+
+def test_a_reverse_gear_is_read_off_either_gear_channel() -> None:
+    import numpy as np
+
+    import tools.follow as follow
+    from core.bridge.layout import BLOCK_DTYPE
+
+    block = np.zeros(1, dtype=BLOCK_DTYPE)[0]
+    assert not follow.in_reverse(block["truck"])
+    block["truck"]["gear_displayed"] = -1
+    assert follow.in_reverse(block["truck"])

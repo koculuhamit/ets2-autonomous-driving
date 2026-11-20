@@ -45,6 +45,14 @@ have points hundreds of metres apart, and a narrow search misses the very
 lane the truck is on."""
 LANE_SPACING_M = 2.0
 ROUTE_SPACING_M = 1.0
+ROUTE_BEHIND_M = 500.0
+ROUTE_AHEAD_M = 3000.0
+"""Of a drive's path, this much behind the truck and ahead of it is drawn:
+with its heights off the map, not the truck's own height for the whole of
+it, which floated the route over the lanes downhill and under them uphill."""
+HEIGHT_EVERY_M = 10.0
+"""The path's height is looked up on the route's own line this often along
+it, and drawn straight between."""
 
 
 class Feed:
@@ -203,6 +211,50 @@ def route_fields(points: np.ndarray, height: float = 0.0) -> dict:
     return {"points": _round(_thinned(points, ROUTE_SPACING_M), 2)}
 
 
+def heights_along(points: np.ndarray, ground: np.ndarray, start: int, start_y: float) -> np.ndarray:
+    """Heights for the `(n, 2)` path `points`, off the `(m, 3)` route line
+    `ground` it was made from: each point's on the segment of `ground` nearest
+    it, found walking along from the truck at `start` (its height `start_y`),
+    so that where the route passes over or under itself, the near pass is
+    taken, not the other."""
+    points = np.asarray(points, dtype=float)
+    ground = np.asarray(ground, dtype=float)
+    heights = np.full(len(points), float(start_y))
+    if len(ground) < 2 or len(points) == 0:
+        return heights
+    a, b = ground[:-1], ground[1:]
+    ab = b[:, [0, 2]] - a[:, [0, 2]]
+    length2 = np.maximum((ab**2).sum(axis=1), 1e-9)
+
+    def on(index_range, point) -> tuple[int, float, float]:
+        lo, hi = index_range
+        rel = point - a[lo:hi, [0, 2]]
+        t = np.clip((rel * ab[lo:hi]).sum(axis=1) / length2[lo:hi], 0.0, 1.0)
+        off = rel - t[:, None] * ab[lo:hi]
+        k = int(np.argmin((off**2).sum(axis=1)))
+        y = a[lo + k, 1] + t[k] * (b[lo + k, 1] - a[lo + k, 1])
+        return lo + k, float(y), float(np.sqrt((off[k] ** 2).sum()))
+
+    # Where the truck is: of the segments near it, the one nearest its height.
+    rel = points[start] - a[:, [0, 2]]
+    t = np.clip((rel * ab).sum(axis=1) / length2, 0.0, 1.0)
+    off = np.sqrt(((rel - t[:, None] * ab) ** 2).sum(axis=1))
+    y_all = a[:, 1] + t * (b[:, 1] - a[:, 1])
+    near = np.flatnonzero(off <= off.min() + 5.0)
+    here = int(near[np.argmin(np.abs(y_all[near] - start_y))])
+    heights[start] = y_all[here]
+    for step in (1, -1):
+        segment = here
+        index = start + step
+        while 0 <= index < len(points):
+            window = (max(segment - 60, 0), min(segment + 60, len(a)))
+            found, y, _ = on(window, points[index])
+            segment = found
+            heights[index] = y
+            index += step
+    return heights
+
+
 def lanes_fields(network, x: float, z: float, radius: float = LANES_RADIUS_M) -> dict:
     lanes = []
     for lane in network.lanes_near(x, z, radius):
@@ -269,14 +321,50 @@ class Tap:
         if self._due(wire.POSE, now, POSE_EVERY_S):
             self.feed.send(wire.Message(wire.POSE, now, pose_fields(block)))
 
-    def route(self, now: float, points: np.ndarray, height: float = 0.0) -> None:
+    def route(
+        self,
+        now: float,
+        points: np.ndarray,
+        height: float = 0.0,
+        *,
+        progress: float | None = None,
+        ground=None,
+    ) -> None:
         """Sent when the line is a new one (by identity), and again every
-        few seconds for a bridge that came up after it."""
+        few seconds for a bridge that came up after it. With the truck's
+        `progress` along it and `ground` -- the route it was made from (its
+        `points()`, the lanes' own heights) -- the part about the truck is
+        sent, at the road's heights (`heights_along`); else all of it, at
+        `height`."""
         new = id(points) != self._route_id
         if new or self._due(wire.ROUTE, now, 5.0):
             self._route_id = id(points)
             self._last[wire.ROUTE] = now
-            self.feed.send(wire.Message(wire.ROUTE, now, route_fields(points, height)))
+            line = np.asarray(points, dtype=float)
+            if progress is not None and ground is not None and line.ndim == 2 and len(line) > 1:
+                line = self._on_the_ground(line, progress, height, ground)
+            self.feed.send(wire.Message(wire.ROUTE, now, route_fields(line, height)))
+
+    def _on_the_ground(self, line: np.ndarray, progress: float, height: float, ground):
+        """The path about the truck, `(k, 3)`, its heights off `ground`."""
+        if id(ground) != getattr(self, "_ground_id", None):
+            self._ground_id = id(ground)
+            self._ground = np.asarray(ground.points() if hasattr(ground, "points") else ground)
+        arc = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(line, axis=0).T))])
+        keep = (arc >= progress - ROUTE_BEHIND_M) & (arc <= progress + ROUTE_AHEAD_M)
+        if not keep.any():
+            return line
+        part, along = line[keep], arc[keep]
+        samples = np.unique(
+            np.concatenate([np.arange(along[0], along[-1], HEIGHT_EVERY_M), [along[-1]]])
+        )
+        sample_points = np.column_stack(
+            [np.interp(samples, along, part[:, 0]), np.interp(samples, along, part[:, 1])]
+        )
+        start = int(np.argmin(np.abs(samples - progress)))
+        heights = heights_along(sample_points, self._ground, start, height)
+        y = np.interp(along, samples, heights)
+        return np.column_stack([part[:, 0], y, part[:, 1]])
 
     def lanes(self, now: float, network, x: float, z: float) -> None:
         if network is not None and self._due(wire.LANES, now, LANES_EVERY_S):
