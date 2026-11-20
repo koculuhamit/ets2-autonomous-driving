@@ -2,16 +2,12 @@
 
 [![CI](https://github.com/koculuhamit/ets2-autonomous-driving/actions/workflows/ci.yml/badge.svg)](https://github.com/koculuhamit/ets2-autonomous-driving/actions/workflows/ci.yml)
 
-
-
 https://github.com/user-attachments/assets/3ae98950-220b-4697-ba80-0c3b65493a71
 
-
-
-A delivery to Helsingborg on Linux, from the beacon switched on to the
-depot: 47 km of the game's in 7 minutes, no take-over, no hits. Parts are
-sped up; the whole drive, uncut, with the launcher's window beside the game,
-is on [YouTube](https://www.youtube.com/watch?v=6LOYoDT0Ym8).
+A delivery to Düsseldorf on Linux, from the beacon switched on to the
+depot: 62 km of the game's in 11 minutes, no take-over, no hits. The game
+is on the left, its ROS 2 view in RViz on the right; parts are sped up. The
+whole drive, uncut, is on [YouTube](https://youtu.be/7b_GEeqkvM8).
 
 An external, modular autonomous driving stack for **Euro Truck Simulator 2**.
 
