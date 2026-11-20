@@ -92,6 +92,10 @@ game's, the stack averaged 0.53 interventions per 100 km, with 6 hits and
 167 hard brakes, measured by `tools/report.py`. Those drives came before
 most of the fixes in this release.
 
+Every drive recorded on Linux since then is summed by period in
+[results](results/README.md), with the latency budget from the picture to
+the brake.
+
 Measurements behind the design:
 
 | | |

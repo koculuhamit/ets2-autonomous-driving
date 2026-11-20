@@ -154,10 +154,71 @@ between C++ and Python on two platforms. The layout header is written with
 explicit padding and static assertions so that both compilers should agree,
 and that CI job checks that they do.
 
-The ROS 2 interface is an adapter in `adapters/ros2/`: the drive sends what
-it sees and plans over a local socket, and a ROS 2 node (built with colcon
-against Humble) publishes it for RViz. `core/` does not import `rclpy`, and
-a test checks that it does not; the drive runs the same without ROS.
+### ROS 2 interface
+
+```mermaid
+flowchart LR
+    subgraph stack[the stack: Python 3.11+]
+        loop[control loop<br/>60 Hz] --> feed[feed<br/>one mailbox per kind]
+    end
+    feed -- Unix socket<br/>JSON header + JPEG --> bridge
+    subgraph ros[ROS 2 Humble: Python 3.10]
+        bridge[ets2ad_ros bridge node] --> topics["topics: /tf, odom, route,<br/>detections, markers,<br/>camera, state"]
+    end
+    topics --> rviz[RViz2]
+    replay[tools/ros_replay.py<br/>a recorded drive] --> feed
+```
+
+The adapter lives in `adapters/ros2/`. Humble's `rclpy` is built for the
+system's Python 3.10 and the stack runs on 3.11 or later, so the two never
+share a process. The stack writes small framed messages to a Unix socket
+(`wire.py`, standard library only, imported by both sides), and a ROS 2 node,
+built with colcon, publishes them:
+
+| topic | type |
+|---|---|
+| `/tf` | `map → base_link → eye → eye_optical`, and `map → trailer` |
+| `/ets2/odom`, `/ets2/route` | `nav_msgs/Odometry`, `nav_msgs/Path` (on the road's heights) |
+| `/ets2/detections` | `vision_msgs/Detection3DArray` |
+| `/ets2/markers`, `/ets2/truck`, `/ets2/lanes` | `visualization_msgs/MarkerArray` |
+| `/ets2/camera/image_raw/compressed`, `/ets2/camera/camera_info` | `sensor_msgs` |
+| `/ets2/state` | `std_msgs/String`, JSON |
+
+The game's axes (x east, y up, z south) are turned into REP 103's. The
+control loop never waits for ROS. Each kind of message has a single slot,
+and a newer one replaces one not yet sent, so a slow bridge sees fewer poses
+but never stale ones. With no bridge listening, the messages are dropped.
+The node only publishes and sends nothing to the game. `core/` does not
+import `rclpy`, a test checks that it does not, and the drive runs the same
+without ROS. `tools/ros_replay.py` plays a recorded drive into the same
+topics.
+
+### Why pure pursuit and a PI speed controller
+
+The lateral controller is pure pursuit on the planned lane line. The speed
+controller is PI with feedforward for the gradient and measured pedal maps.
+No MPC, and no comparison between controllers was run. The reasons:
+
+- **The path is known exactly.** The truck's position comes from telemetry
+  and the lane from the game's own map, so there is no perception noise in
+  the lateral loop for a model to filter. On a planned motorway route at
+  40 km/h, pure pursuit stayed 0.089 m RMS from the lane's middle, 0.36 m at
+  worst ([route_following](docs/results/route_following.md)).
+- **The hard part was the actuators, not the control law.** The game takes
+  a steering *rate*, not an angle. Its steering ratio is progressive, 0.112
+  to 0.132. Its brake does nothing up to 0.055 and then gives 1.8 m/s² at
+  once. Each of these was measured ([sysid](docs/results/sysid.md)) and
+  inverted, and a better controller on top of an unmeasured plant would have
+  hidden them.
+- **The trailer is handled in planning.** Tight turns are planned deeper
+  into the junction, so the trailer stays off the kerb. A tracking controller
+  could not do that, because it follows whatever line it is given.
+- **One knob with a physical meaning.** Pure pursuit's look-ahead distance,
+  and its failure, cutting corners, shows plainly in a trace.
+
+An MPC would need a model of the game's steering-rate controller and of the
+trailer. It is the natural next step if the remaining trailer off-tracking
+in very tight turns (R < 10 m) were worth the work.
 
 ## Platform support
 
@@ -184,6 +245,9 @@ against it, with no game, GPU or X server. Select it with
 ## Documentation
 
 - [Technical report](docs/report.md): the design and the measurements behind it
+- [Results](docs/results/README.md): where the stack stands now, the latency
+  budget, and the lab notes behind each part
+- [Architecture decision records](docs/adr/)
 - [Game compatibility and control mixes](docs/compat.md)
 - [Border crossings](docs/borders.md)
 - Install guides: [Linux](docs/install-linux.md), [Windows](docs/install-windows.md)
